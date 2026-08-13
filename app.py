@@ -15,6 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import auth
 import capacity_model as cm
 
 APP_DIR = Path(__file__).parent
@@ -43,6 +44,9 @@ st.set_page_config(
     else "🏭",
     layout="wide",
 )
+
+# Nothing below this line renders until the password is accepted.
+auth.require_password()
 
 
 # ---------------------------------------------------------------------------

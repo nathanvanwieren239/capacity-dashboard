@@ -11,11 +11,27 @@ python synthetic_data.py     # regenerates data/capacity.csv and data/demand.csv
 streamlit run app.py
 ```
 
+## Password
+
+The app is gated by a single shared password read from Streamlit secrets.
+It is never stored in this repo.
+
+**Locally:** copy `.streamlit/secrets.toml.example` to
+`.streamlit/secrets.toml` and set a real value. That file is gitignored.
+
+**On Community Cloud:** app menu → Settings → Secrets, paste
+`APP_PASSWORD = "..."`, then reboot the app.
+
+If no password is configured the app refuses to start rather than serving
+openly. Note this is a shared password, not per-user accounts, and there is
+no lockout on repeated attempts.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `app.py` | Streamlit UI only |
+| `auth.py` | Shared-password gate, reads `APP_PASSWORD` from secrets |
 | `capacity_model.py` | All capacity math — no Streamlit, so it can be tested or reused |
 | `synthetic_data.py` | Demo data generator + the authoritative column contracts |
 | `data/` | Generated CSVs. Replace with real extracts, same columns |
