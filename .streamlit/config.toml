@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#416AB9"   # NN brand blue, sampled from the logo
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F4F7"
+textColor = "#1A1D21"
+
+[server]
+# Uploaded CSVs stay in memory for the session; nothing is written to disk.
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

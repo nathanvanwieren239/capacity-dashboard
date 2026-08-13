@@ -1,0 +1,26 @@
+# Generated demo data - app regenerates on first run
+data/*.csv
+
+# Never commit real extracts
+data/real/
+*.xlsx
+*.xlsb
+*.xlsm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Secrets
+.streamlit/secrets.toml
+*.json.key
+service_account*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
