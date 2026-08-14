@@ -30,12 +30,30 @@ no lockout on repeated attempts.
 
 | File | Purpose |
 |---|---|
-| `app.py` | Streamlit UI only |
+| `app.py` | Entrypoint: page config, auth, logo, page navigation |
+| `config.py` | Shared constants (year, current week, paths, colors) |
 | `auth.py` | Shared-password gate, reads `APP_PASSWORD` from secrets |
+| `views/capacity_page.py` | Machine Capacity page |
+| `views/launch_page.py` | Launch Portfolio page |
 | `capacity_model.py` | All capacity math — no Streamlit, so it can be tested or reused |
-| `synthetic_data.py` | Demo data generator + the authoritative column contracts |
+| `launch_model.py` | Launch/gate/shared-resource math — also Streamlit-free |
+| `synthetic_data.py` | Capacity demo data + the authoritative column contracts |
+| `launch_data.py` | Portfolio demo data + its column contracts |
 | `data/` | Generated CSVs. Replace with real extracts, same columns |
 | `assets/` | NN logo + favicon, picked up automatically. Sidebar size is `LOGO_WIDTH_PX` in `app.py` |
+
+## Pages
+
+**Machine Capacity** — machine hours vs. demand, by work center. Load is
+measured in hours against three capacity tiers.
+
+**Launch Portfolio** — launch and prototype gate status. Load here is
+milestone *events* landing in the same week and pulling on a shared support
+resource (the QA lab), not machine hours. Same load-vs-capacity shape,
+different unit, which is why it's a separate page.
+
+Prototypes sit in the same table as launches because they draw on the same
+lab. That was an explicit ask — there's currently no tracking for them.
 
 ## The model
 
