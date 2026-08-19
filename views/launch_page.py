@@ -294,42 +294,7 @@ else:
             e_prr = c8.number_input("PRR count", 0, 50, int(rec["prr_count"]))
             e_comments = st.text_area("Comments", str(rec["comments"] or ""), height=68)
 
-            st.markdown("**Gate dates**")
-            st.caption(
-                "Original week is locked — it is the commitment the on-time "
-                "metric is measured against. Record slips in Adjusted."
-            )
-            gsub = (
-                gates_all[gates_all["project_id"] == pick]
-                .sort_values("gate_no")[
-                    ["gate_no", "gate_code", "gate_name",
-                     "original_week", "adjusted_week", "actual_week"]
-                ]
-                .copy()
-            )
-            for col in ("adjusted_week", "actual_week"):
-                gsub[col] = gsub[col].astype("float")
-
-            edited = st.data_editor(
-                gsub,
-                width="stretch",
-                hide_index=True,
-                disabled=["gate_no", "gate_code", "gate_name", "original_week"],
-                column_config={
-                    "gate_no": st.column_config.NumberColumn("#", width="small"),
-                    "gate_code": st.column_config.TextColumn("Gate", width="small"),
-                    "gate_name": st.column_config.TextColumn("Name"),
-                    "original_week": st.column_config.NumberColumn("Original", width="small"),
-                    "adjusted_week": st.column_config.NumberColumn(
-                        "Adjusted", min_value=1, max_value=52, step=1, width="small"
-                    ),
-                    "actual_week": st.column_config.NumberColumn(
-                        "Actual", min_value=1, max_value=52, step=1, width="small"
-                    ),
-                },
-                key=f"gates_{pick}",
-            )
-            save = st.form_submit_button("Save changes")
+            save = st.form_submit_button("Save project fields")
 
         if save:
             try:
@@ -347,7 +312,6 @@ else:
                         "comments": e_comments.strip(),
                     },
                 )
-                changes += store.update_gates(role, pick, edited)
             except Exception as exc:
                 st.error(f"Could not save: {exc}")
             else:
@@ -357,6 +321,85 @@ else:
                     st.rerun()
                 else:
                     st.info("Nothing changed.")
+
+        # -- gates ----------------------------------------------------------
+        # Deliberately OUTSIDE the form above: st.data_editor cannot add or
+        # delete rows inside a form, and its edits do not register until the
+        # form is submitted. Its own save button keeps the two independent.
+        st.markdown("**Gates**")
+        st.caption(
+            "Edit any cell. Use the bottom row to add a gate and the trash "
+            "icon to remove one. Gate code is the label shown in the timeline "
+            "dot, so keep it to one or two characters."
+        )
+        st.warning(
+            "Changing **Original** rewrites the committed date the on-time "
+            "metric is measured against — it does not record a slip, it erases "
+            "one. Put slips in **Adjusted**. Original edits are tagged "
+            "`baseline` in the audit log.",
+            icon="⚠️",
+        )
+
+        # reset_index is required: with num_rows="dynamic" a non-range index
+        # makes the editor ask the user to supply index values for new rows.
+        gsub = (
+            gates_all[gates_all["project_id"] == pick]
+            .sort_values("gate_no")[store.GATE_EDIT_COLUMNS]
+            .reset_index(drop=True)
+            .copy()
+        )
+        for col in ("adjusted_week", "actual_week"):
+            gsub[col] = gsub[col].astype("float")
+
+        edited = st.data_editor(
+            gsub,
+            width="stretch",
+            hide_index=True,
+            num_rows="dynamic",
+            column_config={
+                "gate_no": st.column_config.NumberColumn(
+                    "Order", min_value=0, max_value=99, step=1, width="small",
+                    help="Sort order. Must be unique within the project.",
+                ),
+                "gate_code": st.column_config.TextColumn(
+                    "Code", width="small", max_chars=2,
+                    help="Shown inside the timeline dot, e.g. 0 1 2 3 P 4.",
+                ),
+                "gate_name": st.column_config.TextColumn("Name", width="medium"),
+                "original_week": st.column_config.NumberColumn(
+                    "Original", min_value=1, max_value=52, step=1, width="small",
+                    help="The committed date. On-time is measured against this.",
+                ),
+                "adjusted_week": st.column_config.NumberColumn(
+                    "Adjusted", min_value=1, max_value=52, step=1, width="small",
+                    help="Revised date. Records a slip without hiding it.",
+                ),
+                "actual_week": st.column_config.NumberColumn(
+                    "Actual", min_value=1, max_value=52, step=1, width="small",
+                    help="Completion week. Blank means the gate is still open.",
+                ),
+                "qa_lab_hours": st.column_config.NumberColumn(
+                    "QA lab h", min_value=0.0, step=1.0, format="%.1f",
+                    width="small",
+                ),
+            },
+            key=f"gates_{pick}",
+        )
+
+        if st.button("Save gate changes", key=f"save_gates_{pick}"):
+            try:
+                gate_changes = store.replace_gates(role, pick, edited)
+            except store.ValidationError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Could not save gates: {exc}")
+            else:
+                if gate_changes:
+                    st.cache_data.clear()
+                    st.success("Saved: " + "; ".join(gate_changes))
+                    st.rerun()
+                else:
+                    st.info("No gate changes to save.")
 
     # -- add gate zero ------------------------------------------------------
     with tab_gate0:

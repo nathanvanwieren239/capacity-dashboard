@@ -23,9 +23,20 @@ Changes write to `data/projects.csv` and `data/gates.csv` and appear
 immediately. Every change is appended to `data/audit_log.csv` with a
 timestamp, the role that made it, and the old and new values.
 
-> **`original_week` is locked.** It's the commitment the on-time metric is
-> measured against, so it's write-once at creation. Slips go in
-> `adjusted_week`, which keeps the slip visible instead of erasing it.
+The gate grid is fully editable: change any cell, add a gate with the bottom
+row, delete one with the trash icon. That covers promoting a simple launch to
+a full one, renaming gates to match the real process, and adjusting QA lab
+hours per gate.
+
+> **`original_week` is editable but load-bearing.** It's the commitment the
+> on-time metric is measured against, so changing it rewrites history rather
+> than recording a slip. Slips belong in `adjusted_week`. Original edits are
+> tagged `baseline` in the audit log so they stay distinguishable from
+> ordinary changes.
+
+Gate saves are validated: gate numbers must be unique, codes can't be blank,
+weeks must be 1–52, QA hours can't be negative, and a project must keep at
+least one gate. A rejected save changes nothing and writes no audit entries.
 
 ⚠️ **Persistence caveat.** These writes are durable when the app runs on a
 machine you control — your laptop, or an internal server. They are **not**

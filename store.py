@@ -58,11 +58,26 @@ EDITABLE_PROJECT_FIELDS = [
     "comments",
 ]
 
-# Gate dates an editor may change. original_week is deliberately absent:
-# it is the commitment the on-time metric is measured against, so it is
-# write-once at creation. Slipping a date goes in adjusted_week, which keeps
-# the slip visible instead of erasing it.
-EDITABLE_GATE_FIELDS = ["adjusted_week", "actual_week"]
+# Every gate column an editor may change, including the gate set itself.
+#
+# original_week is editable, but treat it as load-bearing: it is the
+# commitment the on-time metric is measured against, so changing it rewrites
+# history rather than recording a slip. Slips belong in adjusted_week. The
+# audit log flags original_week edits separately so they stay visible.
+GATE_EDIT_COLUMNS = [
+    "gate_no",
+    "gate_code",
+    "gate_name",
+    "original_week",
+    "adjusted_week",
+    "actual_week",
+    "qa_lab_hours",
+]
+
+BASELINE_FIELD = "original_week"
+
+_INT_GATE_FIELDS = ["gate_no", "original_week"]
+_NULLABLE_INT_GATE_FIELDS = ["adjusted_week", "actual_week"]
 
 
 # ---------------------------------------------------------------------------
@@ -245,41 +260,132 @@ def update_project(role: str, pid: str, changes: dict) -> list[str]:
     return summary
 
 
-def update_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
+class ValidationError(ValueError):
+    pass
+
+
+def _clean_gate_frame(pid: str, edited: pd.DataFrame) -> pd.DataFrame:
+    """Coerce the edited grid into storable rows, raising on bad input."""
+    df = edited.copy()
+
+    for col in GATE_EDIT_COLUMNS:
+        if col not in df.columns:
+            raise ValidationError(f"Gate grid is missing the {col} column.")
+
+    # Drop rows the editor added but left empty.
+    df = df.dropna(subset=["gate_no", "gate_code", "original_week"], how="all")
+    if df.empty:
+        raise ValidationError("A project must keep at least one gate.")
+
+    for col in ["gate_no", "gate_code", "original_week"]:
+        if df[col].isna().any():
+            raise ValidationError(f"Every gate needs a {col.replace('_', ' ')}.")
+
+    df["gate_code"] = df["gate_code"].astype(str).str.strip()
+    df["gate_name"] = df["gate_name"].fillna("").astype(str).str.strip()
+    if (df["gate_code"] == "").any():
+        raise ValidationError("Gate code cannot be blank — it is the dot label.")
+
+    for col in _INT_GATE_FIELDS:
+        df[col] = df[col].astype(float).round().astype(int)
+    for col in _NULLABLE_INT_GATE_FIELDS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
+    df["qa_lab_hours"] = (
+        pd.to_numeric(df["qa_lab_hours"], errors="coerce").fillna(0.0).astype(float)
+    )
+
+    if df["gate_no"].duplicated().any():
+        dupes = sorted({int(v) for v in df.loc[df["gate_no"].duplicated(), "gate_no"]})
+        raise ValidationError(
+            "Gate number must be unique within a project. Duplicated: "
+            + ", ".join(str(d) for d in dupes)
+        )
+
+    for col in ["original_week"] + _NULLABLE_INT_GATE_FIELDS:
+        bad = df[col].dropna()
+        if len(bad) and ((bad < 1) | (bad > 52)).any():
+            raise ValidationError(f"{col.replace('_', ' ').title()} must be 1–52.")
+
+    if (df["qa_lab_hours"] < 0).any():
+        raise ValidationError("QA lab hours cannot be negative.")
+
+    df["project_id"] = pid
+    return df[["project_id"] + GATE_EDIT_COLUMNS].sort_values(
+        "gate_no", ignore_index=True
+    )
+
+
+def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
     """
-    Apply gate date changes for one project. `edited` must carry gate_no plus
-    any of EDITABLE_GATE_FIELDS. original_week is ignored if present.
+    Replace the whole gate set for one project.
+
+    Handles added rows, deleted rows and field edits. Every difference is
+    audited; changes to original_week are logged as `baseline` so a rewritten
+    commitment stays visible next to ordinary edits.
     """
     projects, gates = lm.load_bundled()
+    new = _clean_gate_frame(pid, edited)
+
+    current = gates[gates["project_id"] == pid].set_index("gate_no")
+    incoming = new.set_index("gate_no")
+
     audit, summary = [], []
 
-    for _, new_row in edited.iterrows():
-        gate_no = int(new_row["gate_no"])
-        mask = (gates["project_id"] == pid) & (gates["gate_no"] == gate_no)
-        if not mask.any():
-            continue
-        current = gates.loc[mask].iloc[0]
+    removed = sorted(set(current.index) - set(incoming.index))
+    for gate_no in removed:
+        code = current.loc[gate_no, "gate_code"]
+        audit.append(_entry(role, "delete", pid, f"gate {code}", code, ""))
+        summary.append(f"Removed gate {code}")
 
-        for field in EDITABLE_GATE_FIELDS:
-            if field not in new_row:
+    added = sorted(set(incoming.index) - set(current.index))
+    for gate_no in added:
+        row = incoming.loc[gate_no]
+        audit.append(
+            _entry(role, "create", pid, f"gate {row['gate_code']}", "",
+                   f"wk {row['original_week']}")
+        )
+        summary.append(f"Added gate {row['gate_code']} at wk {row['original_week']}")
+
+    for gate_no in sorted(set(current.index) & set(incoming.index)):
+        old_row, new_row = current.loc[gate_no], incoming.loc[gate_no]
+        for field in GATE_EDIT_COLUMNS:
+            if field == "gate_no":
                 continue
-            new = new_row[field]
-            new = pd.NA if pd.isna(new) else int(new)
-            old = current[field]
-            if pd.isna(old) and pd.isna(new):
+            old, new_val = old_row[field], new_row[field]
+            if pd.isna(old) and pd.isna(new_val):
                 continue
-            if not pd.isna(old) and not pd.isna(new) and int(old) == int(new):
-                continue
-            gates.loc[mask, field] = new
-            label = f"{current['gate_code']}.{field}"
-            audit.append(_entry(role, "edit", pid, label, old, new))
+            if not pd.isna(old) and not pd.isna(new_val):
+                if field == "qa_lab_hours":
+                    if abs(float(old) - float(new_val)) < 0.05:
+                        continue
+                elif str(old) == str(new_val):
+                    continue
+            action = "baseline" if field == BASELINE_FIELD else "edit"
+            label = f"{old_row['gate_code']}.{field}"
+            audit.append(_entry(role, action, pid, label, old, new_val))
+            shown_old = "—" if pd.isna(old) else old
+            shown_new = "—" if pd.isna(new_val) else new_val
+            prefix = "⚠ baseline " if action == "baseline" else ""
             summary.append(
-                f"Gate {current['gate_code']} {field.replace('_', ' ')}: "
-                f"{'—' if pd.isna(old) else int(old)} → "
-                f"{'—' if pd.isna(new) else int(new)}"
+                f"{prefix}Gate {old_row['gate_code']} "
+                f"{field.replace('_', ' ')}: {shown_old} → {shown_new}"
             )
 
     if audit:
+        others = gates[gates["project_id"] != pid]
+        gates = pd.concat(
+            [others, new.reindex(columns=others.columns)], ignore_index=True
+        )
+        for col in _NULLABLE_INT_GATE_FIELDS + ["gate_no", "original_week"]:
+            gates[col] = pd.to_numeric(gates[col], errors="coerce").astype(
+                "Int64" if col in _NULLABLE_INT_GATE_FIELDS else "int64"
+            )
         _write(projects, gates)
         append_audit(audit)
     return summary
+
+
+# Kept for callers that only touch dates.
+def update_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
+    return replace_gates(role, pid, edited)
