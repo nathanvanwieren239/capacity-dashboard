@@ -1,19 +1,22 @@
 """
-Shared-password gate for the dashboard.
+Two-role password gate.
 
-The password is NEVER stored in this repo. It lives in Streamlit secrets:
+Passwords are NEVER stored in this repo. They live in Streamlit secrets:
 
     local  ->  .streamlit/secrets.toml      (gitignored)
     cloud  ->  app settings -> Secrets
 
-Either way the contents are:
+    APP_PASSWORD_VIEWER = "one-password"
+    APP_PASSWORD_EDITOR = "a-different-password"
 
-    APP_PASSWORD = "pick-something-long"
+`viewer` can see everything. `editor` additionally gets the data-entry forms
+(Add New Gate Zero, Add New Prototype).
 
-This is a single shared password, not per-user accounts. It stops casual
-access to a link; it is not an identity system and there is no lockout on
-repeated attempts. On Community Cloud it sits on top of the viewer allow-list
-you get from deploying a private repo.
+This is a DEVELOPMENT stand-in for real accounts. It is a shared password per
+role, not per-user identity, so it cannot tell you *who* changed a date - only
+that someone with the editor password did. Real accountability needs named
+logins, which is a reason to move this behind the company intranet before it
+carries live data.
 """
 
 from __future__ import annotations
@@ -22,62 +25,103 @@ import hmac
 
 import streamlit as st
 
-_SESSION_KEY = "_auth_ok"
+_ROLE_KEY = "_auth_role"
 _PLACEHOLDER = "change-me"
 
+VIEWER = "viewer"
+EDITOR = "editor"
 
-def _configured_password() -> str | None:
-    """Read APP_PASSWORD, tolerating the case where no secrets file exists."""
+_SECRET_FOR_ROLE = {
+    VIEWER: "APP_PASSWORD_VIEWER",
+    EDITOR: "APP_PASSWORD_EDITOR",
+}
+
+
+def _secret(name: str) -> str | None:
     try:
-        value = st.secrets["APP_PASSWORD"]
+        value = st.secrets[name]
     except Exception:
         return None
     return str(value) if value else None
 
 
-def require_password() -> None:
+def _configured() -> dict[str, str]:
+    """Map role -> password, ignoring anything unset or left as placeholder."""
+    out: dict[str, str] = {}
+    for role, key in _SECRET_FOR_ROLE.items():
+        value = _secret(key)
+        if value and value != _PLACEHOLDER:
+            out[role] = value
+
+    # Backwards compatible with the earlier single-password setup.
+    legacy = _secret("APP_PASSWORD")
+    if legacy and legacy != _PLACEHOLDER and VIEWER not in out:
+        out[VIEWER] = legacy
+
+    return out
+
+
+def current_role() -> str | None:
+    return st.session_state.get(_ROLE_KEY)
+
+
+def is_editor() -> bool:
+    return current_role() == EDITOR
+
+
+def require_password() -> str:
     """
-    Block the rest of the script until the correct password is entered.
+    Block the rest of the script until a valid password is entered.
+    Returns the role. Call immediately after st.set_page_config().
 
-    Call immediately after st.set_page_config(), before anything renders.
-    Fails closed: if no password is configured, the app refuses to run rather
-    than silently serving to everyone.
+    Fails closed: with nothing configured the app refuses to start.
     """
-    if st.session_state.get(_SESSION_KEY):
-        return
+    role = current_role()
+    if role:
+        return role
 
-    expected = _configured_password()
+    passwords = _configured()
 
-    if expected is None:
+    if not passwords:
         st.error(
-            "No `APP_PASSWORD` is configured, so this app will not start.\n\n"
-            "**Local:** create `.streamlit/secrets.toml` containing "
-            "`APP_PASSWORD = \"...\"`\n\n"
-            "**Community Cloud:** app menu → Settings → Secrets, paste the "
-            "same line, then reboot the app."
+            "No passwords are configured, so this app will not start.\n\n"
+            "Set `APP_PASSWORD_VIEWER` and `APP_PASSWORD_EDITOR` in "
+            "`.streamlit/secrets.toml` locally, or under Settings → Secrets "
+            "on Streamlit Community Cloud."
         )
         st.stop()
 
-    if expected == _PLACEHOLDER:
-        st.error(
-            "`APP_PASSWORD` is still set to the placeholder value. "
-            "Change it to a real password before using this app."
-        )
-        st.stop()
-
-    st.title("🏭 Manufacturing Capacity Dashboard")
-    st.caption("Internal demo. Enter the shared password to continue.")
+    st.title("Manufacturing Dashboards")
+    st.caption("Internal demo — synthetic data. Enter your password.")
 
     with st.form("login"):
         entered = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Enter")
 
     if submitted:
-        # Constant-time compare, so response timing does not leak the password.
-        if hmac.compare_digest(entered, expected):
-            st.session_state[_SESSION_KEY] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
+        for candidate_role, expected in passwords.items():
+            # Constant-time compare so timing does not leak the password.
+            if hmac.compare_digest(entered, expected):
+                st.session_state[_ROLE_KEY] = candidate_role
+                st.rerun()
+        st.error("Incorrect password.")
+
+    if EDITOR not in passwords:
+        st.info(
+            "Only a viewer password is configured. Add `APP_PASSWORD_EDITOR` "
+            "to enable the data-entry forms."
+        )
 
     st.stop()
+
+
+def sidebar_badge() -> None:
+    """Show the signed-in role, with a way to drop back to the login screen."""
+    role = current_role()
+    if not role:
+        return
+    label = "Editor — can add entries" if role == EDITOR else "Viewer — read only"
+    st.sidebar.caption(f"Signed in as **{label}**")
+    if st.sidebar.button("Sign out", width="stretch"):
+        st.session_state.pop(_ROLE_KEY, None)
+        st.rerun()

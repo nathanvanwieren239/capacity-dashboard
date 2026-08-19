@@ -26,7 +26,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Nothing below this line renders until the password is accepted.
+# Nothing below this line renders until a valid password is accepted.
 auth.require_password()
 
 # --- branding, shown on every page ----------------------------------------
@@ -38,6 +38,8 @@ if logo.exists():
 else:
     st.sidebar.markdown("### `[ logo ]`")
     st.sidebar.caption("Drop logo.png in ./assets")
+
+auth.sidebar_badge()
 
 # --- navigation -----------------------------------------------------------
 pages = [

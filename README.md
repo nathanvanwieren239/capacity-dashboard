@@ -11,20 +11,79 @@ python synthetic_data.py     # regenerates data/capacity.csv and data/demand.csv
 streamlit run app.py
 ```
 
+## Editing data — and where it saves
+
+Signed in as **editor**, the Launch Portfolio page has a Data entry section:
+
+- **Edit existing** — change project fields and gate dates for any project
+- **Add New Gate Zero** — creates a launch and its full gate set
+- **Add New Prototype** — creates a prototype and its gate set
+
+Changes write to `data/projects.csv` and `data/gates.csv` and appear
+immediately. Every change is appended to `data/audit_log.csv` with a
+timestamp, the role that made it, and the old and new values.
+
+> **`original_week` is locked.** It's the commitment the on-time metric is
+> measured against, so it's write-once at creation. Slips go in
+> `adjusted_week`, which keeps the slip visible instead of erasing it.
+
+⚠️ **Persistence caveat.** These writes are durable when the app runs on a
+machine you control — your laptop, or an internal server. They are **not**
+durable on Streamlit Community Cloud: that container is rebuilt on every
+deploy and can be recycled at any time, and `data/*.csv` is gitignored, so a
+fresh container regenerates synthetic data. Edits made on the hosted demo
+will be lost.
+
+All file access is isolated in `store.py`. When the source of truth is
+settled — SharePoint Excel, a Google Sheet, or an internal database — that
+one module changes and nothing else has to.
+
+## Gate model
+
+    Gate 0 → Gate 1 → Gate 2 → Gate 3 → PPAP (P) → Gate 4 (SOP sign-off)
+
+A **simple launch** skips gates 1–3 and starts at PPAP, but still requires
+Gate 4. Used for part families where one part takes a full launch and the
+rest follow. Tagged `◇ SIMPLE` with a dotted timeline span.
+
+Gate status is *derived from dates*, never stored:
+
+| State | Color | Meaning |
+|---|---|---|
+| Complete | green | actual date recorded |
+| In progress | yellow | open, due week still ahead |
+| Behind | red | open, due week has passed |
+
+Project-level status (green/yellow/red) is assessed separately by the PM and
+shown as the leading circle on each row.
+
+**On-time is measured against the ORIGINAL committed date**, not the adjusted
+one. Measured against the adjusted date, any project could stay green by
+moving its own target — which is the accountability gap that motivates
+restricting edit access.
+
 ## Password
 
-The app is gated by a single shared password read from Streamlit secrets.
-It is never stored in this repo.
+Two dummy login types, read from Streamlit secrets. Never stored in this repo.
+
+```toml
+APP_PASSWORD_VIEWER = "..."   # read only
+APP_PASSWORD_EDITOR = "..."   # also gets the entry forms
+```
 
 **Locally:** copy `.streamlit/secrets.toml.example` to
-`.streamlit/secrets.toml` and set a real value. That file is gitignored.
+`.streamlit/secrets.toml`. That file is gitignored.
 
-**On Community Cloud:** app menu → Settings → Secrets, paste
-`APP_PASSWORD = "..."`, then reboot the app.
+**On Community Cloud:** app menu → Settings → Secrets, paste both lines,
+reboot.
 
-If no password is configured the app refuses to start rather than serving
-openly. Note this is a shared password, not per-user accounts, and there is
-no lockout on repeated attempts.
+If nothing is configured the app refuses to start rather than serving openly.
+The older single `APP_PASSWORD` key still works and maps to viewer.
+
+These are shared passwords per role, not per-user accounts — so they can tell
+you that *an* editor changed a date, not *which* one. Real accountability
+needs named logins, which is an argument for moving this behind the intranet
+before it carries live data.
 
 ## Files
 
@@ -37,6 +96,9 @@ no lockout on repeated attempts.
 | `views/launch_page.py` | Launch Portfolio page |
 | `capacity_model.py` | All capacity math — no Streamlit, so it can be tested or reused |
 | `launch_model.py` | Launch/gate/shared-resource math — also Streamlit-free |
+| `launch_charts.py` | Plotly figure builders, renderable outside Streamlit |
+| `store.py` | The only module that writes data. Swap this to change source of truth |
+| `preview.py` | Renders the launch charts to `preview/` as static HTML |
 | `synthetic_data.py` | Capacity demo data + the authoritative column contracts |
 | `launch_data.py` | Portfolio demo data + its column contracts |
 | `data/` | Generated CSVs. Replace with real extracts, same columns |
