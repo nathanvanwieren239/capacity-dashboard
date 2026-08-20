@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import capacity_model as cm
-from config import CURRENT_WEEK, YEAR
+from config import CAPACITY_CURRENT_WEEK as CURRENT_WEEK, CAPACITY_YEAR as YEAR
 
 # Released uses the NN brand blue; Launch stays high-contrast orange on
 # purpose - it is the series the whole story hangs on.
@@ -185,7 +185,14 @@ util = cm.utilization(f_demand, f_capacity, basis, by_plant)
 metrics = cm.headline_metrics(util)
 
 # --- header ---------------------------------------------------------------
-st.title("🏭 Machine Capacity")
+st.title("🏭 Machine Capacity — future state")
+st.info(
+    "**Future state.** This page is a concept for machine-hour capacity and "
+    "runs on entirely invented plants, work centers and demand. It is not "
+    "connected to the launch tracker. The working tool is the "
+    "**Launch Portfolio** page.",
+    icon="🧪",
+)
 st.caption(
     f"Weeks {week_start}–{week_end} ({YEAR}) · {', '.join(plants)} · "
     f"utilization measured against **{cm.TIERS[basis].label}** · "

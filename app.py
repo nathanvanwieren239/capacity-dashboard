@@ -44,15 +44,15 @@ auth.sidebar_badge()
 # --- navigation -----------------------------------------------------------
 pages = [
     st.Page(
-        "views/capacity_page.py",
-        title="Machine Capacity",
-        icon=":material/precision_manufacturing:",
-        default=True,
-    ),
-    st.Page(
         "views/launch_page.py",
         title="Launch Portfolio",
         icon=":material/rocket_launch:",
+        default=True,
+    ),
+    st.Page(
+        "views/capacity_page.py",
+        title="Machine Capacity (future state)",
+        icon=":material/science:",
     ),
 ]
 

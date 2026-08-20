@@ -1,18 +1,20 @@
 """
 Plotly figure builders for the Launch Portfolio page.
 
-Kept free of Streamlit so the figures can be rendered headlessly - for a
-static preview, an emailed image, or a test - without booting the app.
+Streamlit-free, so figures can be rendered headlessly for a static preview
+or dropped into a deck.
 """
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import plotly.graph_objects as go
 
+import gate_schedule as gs
 import launch_model as lm
 from config import (
-    CURRENT_WEEK,
     GATE_COLORS,
     PROJECT_STATUS_ICON,
     PROTOTYPE_TAG,
@@ -35,86 +37,106 @@ def row_label(r) -> str:
 
 
 def gate_timeline(
-    progress: pd.DataFrame, gates: pd.DataFrame, weeks: list[int]
+    progress: pd.DataFrame,
+    gates: pd.DataFrame,
+    as_of: date,
+    show_six_month: bool = True,
 ) -> go.Figure:
     """
-    Projects on Y, weeks on X. Each gate is a NUMBERED dot on its due week,
-    colored by status. Simple launches show fewer dots - they skip 1-3.
+    Projects on Y, calendar dates on X. Each gate is a numbered dot on its due
+    date, colored by status. The 6 month review is a diamond on a dashed tail
+    past Gate 4 — visible, but clearly not part of the launch itself.
     """
     fig = go.Figure()
 
-    order = progress.sort_values(["plant", "sop_original_week", "project_id"])
+    order = progress.sort_values(["plant", "sop_due_date", "project_id"])
     labels = {r.project_id: row_label(r) for r in order.itertuples()}
-
-    for r in order.itertuples():
-        sop = r.sop_actual_week if pd.notna(r.sop_actual_week) else r.sop_original_week
-        fig.add_scatter(
-            x=[r.gate_zero_week, sop],
-            y=[labels[r.project_id]] * 2,
-            mode="lines",
-            line=dict(
-                color="#DDE1E7",
-                width=8,
-                dash="dot" if r.launch_type == "Simple" else "solid",
-            ),
-            hoverinfo="skip",
-            showlegend=False,
-        )
 
     g = gates[gates["project_id"].isin(labels)].copy()
     g["label"] = g["project_id"].map(labels)
+    g = g[g["due_date"].notna()]
+    if not show_six_month:
+        g = g[g["gate_code"] != gs.SIX_MONTH_CODE]
+
+    # Spans: solid through the launch, dashed out to the 6 month review.
+    for r in order.itertuples():
+        rows = g[g["project_id"] == r.project_id]
+        if rows.empty:
+            continue
+        launch_rows = rows[rows["gate_code"] != gs.SIX_MONTH_CODE]
+        if not launch_rows.empty:
+            fig.add_scatter(
+                x=[launch_rows["due_date"].min(), launch_rows["due_date"].max()],
+                y=[labels[r.project_id]] * 2,
+                mode="lines",
+                line=dict(
+                    color="#DDE1E7", width=8,
+                    dash="dot" if r.launch_type == "Simple" else "solid",
+                ),
+                hoverinfo="skip", showlegend=False,
+            )
+        six = rows[rows["gate_code"] == gs.SIX_MONTH_CODE]
+        if not six.empty and not launch_rows.empty:
+            fig.add_scatter(
+                x=[launch_rows["due_date"].max(), six["due_date"].iloc[0]],
+                y=[labels[r.project_id]] * 2,
+                mode="lines",
+                line=dict(color="#DDE1E7", width=2, dash="dash"),
+                hoverinfo="skip", showlegend=False,
+            )
 
     for status in lm.GATE_STATUSES:
         sub = g[g["status"] == status]
         if sub.empty:
             continue
+        is_six = sub["gate_code"] == gs.SIX_MONTH_CODE
         fig.add_scatter(
-            x=sub["due_week"],
-            y=sub["label"],
-            mode="markers+text",
-            name=status,
-            text=sub["gate_code"],
-            textposition="middle center",
-            textfont=dict(color="white", size=11, family="Arial Black"),
+            x=sub["due_date"], y=sub["label"],
+            mode="markers+text", name=status,
+            text=sub["gate_code"], textposition="middle center",
+            textfont=dict(color="white", size=9, family="Arial Black"),
             marker=dict(
-                size=24, color=GATE_COLORS[status], line=dict(width=2, color="white")
+                size=[26 if s else 24 for s in is_six],
+                color=GATE_COLORS[status],
+                symbol=["diamond" if s else "circle" for s in is_six],
+                line=dict(width=1.5, color="white"),
             ),
-            customdata=sub[
-                ["gate_name", "original_week", "adjusted_week", "qa_lab_hours"]
-            ],
+            customdata=sub[["gate_name", "plan_date", "adjusted_date", "actual_date"]],
             hovertemplate=(
                 "%{y}<br>%{customdata[0]}"
-                "<br>Due wk %{x} · original wk %{customdata[1]}"
-                f"<br><b>{status}</b>"
-                "<br>QA lab %{customdata[3]:.0f} h<extra></extra>"
+                "<br>Due %{x|%d %b %Y}"
+                "<br>Plan %{customdata[1]} · adjusted %{customdata[2]}"
+                "<br>Actual %{customdata[3]}"
+                f"<br><b>{status}</b><extra></extra>"
             ),
         )
 
-    fig.add_vline(
-        x=CURRENT_WEEK,
+    # add_vline() cannot take a datetime.date when it also draws an
+    # annotation, so the line and label are added separately.
+    stamp = pd.Timestamp(as_of)
+    fig.add_shape(
+        type="line", x0=stamp, x1=stamp, xref="x", yref="paper", y0=0, y1=1,
         line=dict(color="#1A1D21", width=2, dash="dot"),
-        annotation_text=f"Wk {CURRENT_WEEK}",
-        annotation_position="top",
+    )
+    fig.add_annotation(
+        x=stamp, xref="x", yref="paper", y=1.02, showarrow=False,
+        text="today", font=dict(size=11, color="#1A1D21"),
     )
 
     fig.update_layout(
         height=max(380, 38 * len(order) + 130),
         margin=dict(l=10, r=10, t=54, b=10),
-        xaxis_title="Manufacturing week",
-        yaxis_title=None,
+        xaxis_title=None, yaxis_title=None,
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
         hovermode="closest",
     )
-    fig.update_xaxes(range=[min(weeks) - 1, max(weeks) + 1], dtick=2)
+    fig.update_xaxes(tickformat="%b %Y", dtick="M1", tickangle=-40)
     fig.update_yaxes(categoryorder="array", categoryarray=list(labels.values())[::-1])
     return fig
 
 
 def gate_status_bars(progress: pd.DataFrame, gates: pd.DataFrame) -> go.Figure:
-    """
-    One horizontal bar per project, one segment per gate. The segment carries
-    the gate number as its label and the status as its color.
-    """
+    """One bar per project, one segment per gate, numbered and status-colored."""
     order = progress.sort_values(["pct_complete", "project_id"], ascending=[False, True])
     labels = {r.project_id: row_label(r) for r in order.itertuples()}
 
@@ -125,29 +147,25 @@ def gate_status_bars(progress: pd.DataFrame, gates: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     for seq in range(1, int(g["seq"].max()) + 1):
         sub = g[g["seq"] == seq].set_index("label").reindex(labels.values())
-        present = sub["gate_code"].notna()
         fig.add_bar(
             y=sub.index,
-            x=present.astype(int),
+            x=sub["gate_code"].notna().astype(int),
             orientation="h",
             text=sub["gate_code"].fillna(""),
-            textposition="inside",
-            insidetextanchor="middle",
-            textfont=dict(color="white", size=12, family="Arial Black"),
+            textposition="inside", insidetextanchor="middle",
+            textfont=dict(color="white", size=11, family="Arial Black"),
             marker=dict(
                 color=[
-                    GATE_COLORS.get(s, "rgba(0,0,0,0)")
-                    if pd.notna(s)
-                    else "rgba(0,0,0,0)"
+                    GATE_COLORS.get(s, "rgba(0,0,0,0)") if pd.notna(s) else "rgba(0,0,0,0)"
                     for s in sub["status"]
                 ],
                 line=dict(color="white", width=2),
             ),
             showlegend=False,
-            customdata=sub[["gate_name", "status", "due_week"]].values,
+            customdata=sub[["gate_name", "status", "due_date"]].values,
             hovertemplate=(
-                "%{y}<br>%{customdata[0]}"
-                "<br>%{customdata[1]} · due wk %{customdata[2]}<extra></extra>"
+                "%{y}<br>%{customdata[0]}<br>%{customdata[1]} · due %{customdata[2]}"
+                "<extra></extra>"
             ),
         )
 
@@ -155,43 +173,35 @@ def gate_status_bars(progress: pd.DataFrame, gates: pd.DataFrame) -> go.Figure:
         barmode="stack",
         height=max(340, 32 * len(order) + 110),
         margin=dict(l=10, r=10, t=30, b=10),
-        xaxis_title="Gates",
-        yaxis_title=None,
-        bargap=0.3,
+        xaxis_title="Gates", yaxis_title=None, bargap=0.3,
     )
     fig.update_xaxes(dtick=1)
     fig.update_yaxes(categoryorder="array", categoryarray=list(labels.values())[::-1])
     return fig
 
 
-def qa_lab_chart(load: pd.DataFrame, weeks: list[int], capacity: float) -> go.Figure:
+def qa_lab_chart(load: pd.DataFrame, capacity: float) -> go.Figure:
+    """Shared-resource view. Hidden on the page by default."""
     fig = go.Figure()
+    if load.empty:
+        return fig
+    weeks = sorted(load["week_start"].unique())
     for ptype in lm.PROJECT_TYPES:
-        sub = load[load["project_type"] == ptype].set_index("week")["hours"]
+        sub = load[load["project_type"] == ptype].set_index("week_start")["hours"]
         fig.add_bar(
-            x=weeks,
-            y=sub.reindex(weeks, fill_value=0.0).values,
-            name=ptype,
-            marker_color=TYPE_COLORS[ptype],
-            hovertemplate=f"{ptype}<br>Wk %{{x}}: %{{y:,.0f}} h<extra></extra>",
+            x=weeks, y=[float(sub.get(w, 0.0)) for w in weeks],
+            name=ptype, marker_color=TYPE_COLORS[ptype],
+            hovertemplate=f"{ptype}<br>w/c %{{x|%d %b}}: %{{y:,.0f}} h<extra></extra>",
         )
-
     fig.add_scatter(
-        x=weeks,
-        y=[capacity] * len(weeks),
-        mode="lines",
-        name="Lab capacity",
+        x=weeks, y=[capacity] * len(weeks), mode="lines", name="Lab capacity",
         line=dict(color="#D62728", width=2, dash="dash"),
-        hovertemplate="Capacity %{y:,.0f} h<extra></extra>",
     )
     fig.update_layout(
-        barmode="stack",
-        height=330,
-        margin=dict(l=10, r=10, t=36, b=10),
-        xaxis_title="Manufacturing week",
-        yaxis_title="QA lab hours",
+        barmode="stack", height=330, margin=dict(l=10, r=10, t=36, b=10),
+        xaxis_title=None, yaxis_title="QA lab hours",
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
         hovermode="x unified",
     )
-    fig.update_xaxes(dtick=2)
+    fig.update_xaxes(tickformat="%d %b")
     return fig

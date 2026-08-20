@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 APP_DIR = Path(__file__).parent
 ASSETS_DIR = APP_DIR / "assets"
 DATA_DIR = APP_DIR / "data"
 
-YEAR = 2026
-CURRENT_WEEK = 33  # TODO: replace with date.today().isocalendar().week
+
+def today() -> date:
+    """Single source of 'now', so it can be pinned for testing."""
+    return date.today()
+
+
+# Sites currently in scope for the launch tracker.
+PLANTS = ["Kentwood", "Marshall", "Wellington", "North Attleboro"]
+
+DIVISIONS = ["MS", "PS"]
 
 # NN brand blues, sampled from the logo.
 BRAND_BLUE = "#416AB9"
 BRAND_LIGHT = "#35B0F1"
 
-# Gate status colors, as specified in review:
-#   complete -> green, in progress -> yellow, behind schedule -> red
+# Gate status colors: complete green, in progress yellow, behind red.
 GATE_COLORS = {
     "Complete": "#2CA02C",
     "In progress": "#E8A33D",
@@ -35,3 +43,8 @@ PROJECT_STATUS_ICON = {"Green": "🟢", "Yellow": "🟡", "Red": "🔴"}
 # Simple launches skip gates 1-3; marked so they read differently at a glance.
 SIMPLE_LAUNCH_TAG = "◇ SIMPLE"
 PROTOTYPE_TAG = "▷ PROTO"
+
+# Legacy: the capacity page still works in manufacturing weeks. It is labelled
+# future state because it runs on entirely invented data.
+CAPACITY_YEAR = 2026
+CAPACITY_CURRENT_WEEK = 33

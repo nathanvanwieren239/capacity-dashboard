@@ -2,32 +2,27 @@
 Read/write store for the launch portfolio, plus an append-only audit log.
 
 --------------------------------------------------------------------------
-IMPORTANT - WHERE THIS PERSISTS
+WHERE THIS PERSISTS
 --------------------------------------------------------------------------
-Writes go to CSV files in ./data. That is durable when the app runs on a
-machine you control (your laptop, or an internal server).
+Writes go to CSV files in ./data. Durable on a machine you control - your
+laptop, or an internal server. NOT durable on Streamlit Community Cloud:
+that container is rebuilt on every deploy and `data/*.csv` is gitignored,
+so a fresh container regenerates synthetic data.
 
-It is NOT durable on Streamlit Community Cloud. That container is rebuilt on
-every deploy and can be recycled at any time, and `data/*.csv` is gitignored
-so a fresh container regenerates synthetic data. Edits made on the hosted
-demo will disappear.
-
-This is deliberate for the review build: it makes the entry and edit flow
-real enough to demonstrate without pretending the hosting question is
-settled. When the source of truth is decided - SharePoint Excel, a Google
-Sheet, or an internal database - only this module needs to change. Nothing
-in the page or the model layer touches files directly.
+All file access lives here. When the source of truth is settled - the Gate
+Zero Summary sheet on SharePoint, or an internal database - this module is
+the only one that changes.
 --------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 
-import launch_data as ld
+import gate_schedule as gs
 import launch_model as lm
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -36,48 +31,38 @@ GATES_CSV = DATA_DIR / "gates.csv"
 AUDIT_CSV = DATA_DIR / "audit_log.csv"
 
 AUDIT_COLUMNS = [
-    "timestamp",
-    "role",
-    "action",
-    "project_id",
-    "field",
-    "old_value",
-    "new_value",
+    "timestamp", "role", "action", "project_id", "field", "old_value", "new_value",
 ]
 
-# Fields an editor may change on an existing project.
+# Fields an editor may change on an existing project. Mirrors the Gate Zero
+# form plus the tracker's own columns.
 EDITABLE_PROJECT_FIELDS = [
-    "project_name",
-    "plant",
-    "program_manager",
-    "job_number",
-    "launch_type",
-    "project_status",
-    "sop_actual_week",
-    "prr_count",
-    "comments",
+    "project_name", "customer_part_number", "description",
+    "plant", "div", "customer", "sales_person", "program_manager",
+    "job_number", "qmsi_number", "qmsi_revision", "opportunity_number",
+    "rpn", "peak_annual_sales", "launch_process", "support_required",
+    "launch_risk", "qmsi_capex", "cer_amount", "cer_status", "cer_number",
+    "launch_type", "project_status", "prr_count", "prr_amount_first_year",
+    "gate_zero_date", "ppap_target_date", "sop_target_date", "notes",
 ]
 
-# Every gate column an editor may change, including the gate set itself.
-#
-# original_week is editable, but treat it as load-bearing: it is the
-# commitment the on-time metric is measured against, so changing it rewrites
-# history rather than recording a slip. Slips belong in adjusted_week. The
-# audit log flags original_week edits separately so they stay visible.
+# The three dates that drive every planned gate date.
+SCHEDULE_SEED_FIELDS = ["gate_zero_date", "ppap_target_date", "sop_target_date"]
+
+# Columns shown in the simple gate editor.
+GATE_DATE_COLUMNS = ["plan_date", "adjusted_date", "actual_date"]
+
+# Columns shown in the advanced editor, where the gate set itself changes.
 GATE_EDIT_COLUMNS = [
-    "gate_no",
-    "gate_code",
-    "gate_name",
-    "original_week",
-    "adjusted_week",
-    "actual_week",
-    "qa_lab_hours",
+    "gate_no", "gate_code", "gate_name",
+    "plan_date", "adjusted_date", "actual_date", "qa_lab_hours",
 ]
 
-BASELINE_FIELD = "original_week"
+BASELINE_FIELD = "plan_date"
 
-_INT_GATE_FIELDS = ["gate_no", "original_week"]
-_NULLABLE_INT_GATE_FIELDS = ["adjusted_week", "actual_week"]
+
+class ValidationError(ValueError):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +79,15 @@ def append_audit(rows: list[dict]) -> None:
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=AUDIT_COLUMNS)
-    header = not AUDIT_CSV.exists()
-    df.to_csv(AUDIT_CSV, mode="a", header=header, index=False)
+    df.to_csv(AUDIT_CSV, mode="a", header=not AUDIT_CSV.exists(), index=False)
+
+
+def _fmt(v) -> str:
+    if v is None or (not isinstance(v, (str, date)) and pd.isna(v)):
+        return ""
+    if isinstance(v, date):
+        return v.isoformat()
+    return str(v)
 
 
 def _entry(role: str, action: str, pid: str, field: str, old, new) -> dict:
@@ -105,20 +97,34 @@ def _entry(role: str, action: str, pid: str, field: str, old, new) -> dict:
         "action": action,
         "project_id": pid,
         "field": field,
-        "old_value": "" if pd.isna(old) else old,
-        "new_value": "" if pd.isna(new) else new,
+        "old_value": _fmt(old),
+        "new_value": _fmt(new),
     }
 
 
 # ---------------------------------------------------------------------------
 # Writing
 # ---------------------------------------------------------------------------
+def _iso(v):
+    if v is None or (not isinstance(v, (str, date)) and pd.isna(v)):
+        return None
+    return pd.Timestamp(v).date().isoformat()
+
+
+def _write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    p, g = projects.copy(), gates.copy()
+    for col in lm.DATE_COLUMNS_PROJECTS:
+        if col in p.columns:
+            p[col] = p[col].map(_iso)
+    for col in lm.DATE_COLUMNS_GATES:
+        g[col] = g[col].map(_iso)
+    p.to_csv(PROJECTS_CSV, index=False)
+    g.to_csv(GATES_CSV, index=False)
+
+
 def _append(df: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
-    """
-    Append rows, first coercing the new frame to the existing dtypes.
-    Appending an untyped frame that holds NA in a nullable-int column makes
-    pandas warn about dtype inference; matching dtypes up front avoids it.
-    """
+    """Append rows after matching dtypes, avoiding pandas' concat warning."""
     new = pd.DataFrame(rows, columns=df.columns)
     for col in df.columns:
         try:
@@ -128,112 +134,75 @@ def _append(df: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
     return pd.concat([df, new], ignore_index=True)
 
 
-def _write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    projects.to_csv(PROJECTS_CSV, index=False)
-    gates.to_csv(GATES_CSV, index=False)
-
-
 def next_project_id(projects: pd.DataFrame, is_prototype: bool) -> str:
     prefix = "P" if is_prototype else "L"
-    nums = (
-        projects["project_id"]
-        .str.extract(r"-(\d+)$")[0]
-        .dropna()
-        .astype(int)
-    )
+    nums = projects["project_id"].str.extract(r"-(\d+)$")[0].dropna().astype(int)
     return f"{prefix}-{(int(nums.max()) + 7) if len(nums) else 1000}"
 
 
-def create_project(
-    *,
-    role: str,
-    project_name: str,
-    project_type: str,
-    launch_type: str,
-    plant: str,
-    program_manager: str,
-    job_number: str,
-    family: str,
-    gate_zero_week: int,
-    ppap_week: int | None,
-    sop_week: int,
-    comments: str,
-) -> str:
+def create_project(*, role: str, fields: dict) -> str:
     """
-    Create a project and its gate rows from the standard template, so it
-    appears on the dashboard immediately. Returns the new project_id.
+    Create a project and auto-calculate its whole gate schedule from the
+    three Gate Zero dates. Returns the new project_id.
     """
     projects, gates = lm.load_bundled()
+
+    project_type = fields.get("project_type", "Launch")
+    launch_type = fields.get("launch_type", "Full")
+    if project_type == "Prototype":
+        launch_type = "Prototype"
+
     pid = next_project_id(projects, project_type == "Prototype")
 
-    if project_type == "Prototype":
-        template = ld.PROTOTYPE_GATES
-    elif launch_type == "Simple":
-        template = ld.SIMPLE_LAUNCH_GATES
-    else:
-        template = ld.FULL_LAUNCH_GATES
+    gate_zero = fields.get("gate_zero_date")
+    ppap = fields.get("ppap_target_date")
+    sop = fields.get("sop_target_date")
+    if not gate_zero:
+        raise ValidationError("Gate Zero date is required.")
+    if ppap and gate_zero and ppap < gate_zero:
+        raise ValidationError("PPAP date cannot be before the Gate Zero date.")
+    if sop and ppap and sop < ppap:
+        raise ValidationError("SOP date cannot be before the PPAP date.")
 
-    # Space intermediate gates evenly between Gate 0 and SOP. PPAP, where the
-    # template has one, is pinned to the date entered.
-    n = len(template)
-    span = max(sop_week - gate_zero_week, n - 1)
-    new_gates = []
-    for i, (gate_no, code, name, qa_hours) in enumerate(template):
-        if i == 0:
-            week = gate_zero_week
-        elif i == n - 1:
-            week = sop_week
-        elif code == "P" and ppap_week:
-            week = int(ppap_week)
-        else:
-            week = int(round(gate_zero_week + span * (i / (n - 1))))
-        new_gates.append(
-            {
-                "project_id": pid,
-                "gate_no": gate_no,
-                "gate_code": code,
-                "gate_name": name,
-                "original_week": min(max(week, 1), 52),
-                "adjusted_week": pd.NA,
-                "actual_week": pd.NA,
-                "qa_lab_hours": qa_hours,
-            }
-        )
+    new_gates = gs.build_gate_rows(pid, project_type, launch_type, gate_zero, ppap, sop)
 
-    new_project = {
-        "project_id": pid,
-        "project_name": project_name,
-        "project_type": project_type,
-        "launch_type": launch_type,
-        "family": family,
-        "plant": plant,
-        "program_manager": program_manager,
-        "job_number": job_number,
-        "customer": "",
-        "sop_original_week": sop_week,
-        "sop_actual_week": pd.NA,
-        "project_status": "Green",
-        "prr_count": 0,
-        "comments": comments,
-    }
+    row = {c: "" for c in projects.columns}
+    row.update(
+        {
+            "project_id": pid,
+            "project_type": project_type,
+            "launch_type": launch_type,
+            "project_status": "Green",
+            "prr_count": 0,
+            "prr_amount_first_year": 0.0,
+            "prr_start_date": None,
+            "prr_end_date": None,
+        }
+    )
+    for key, value in fields.items():
+        if key in projects.columns:
+            row[key] = value
+    if not row.get("project_name"):
+        row["project_name"] = (
+            f"{fields.get('customer_part_number','')} — {fields.get('description','')}"
+        ).strip(" —")
 
-    projects = _append(projects, [new_project])
+    projects = _append(projects, [row])
     gates = _append(gates, new_gates)
     _write(projects, gates)
 
     append_audit(
         [
-            _entry(role, "create", pid, "project_name", "", project_name),
-            _entry(role, "create", pid, "gate_zero_week", "", gate_zero_week),
-            _entry(role, "create", pid, "sop_original_week", "", sop_week),
+            _entry(role, "create", pid, "project_name", "", row["project_name"]),
+            _entry(role, "create", pid, "gate_zero_date", "", gate_zero),
+            _entry(role, "create", pid, "ppap_target_date", "", ppap),
+            _entry(role, "create", pid, "sop_target_date", "", sop),
         ]
     )
     return pid
 
 
 def update_project(role: str, pid: str, changes: dict) -> list[str]:
-    """Apply project-level field changes. Returns a list of change summaries."""
     projects, gates = lm.load_bundled()
     mask = projects["project_id"] == pid
     if not mask.any():
@@ -244,15 +213,14 @@ def update_project(role: str, pid: str, changes: dict) -> list[str]:
 
     for field, new in changes.items():
         if field not in EDITABLE_PROJECT_FIELDS:
-            raise ValueError(f"{field} is not editable")
+            raise ValidationError(f"{field} is not editable")
         old = row[field]
-        if pd.isna(old) and pd.isna(new):
-            continue
-        if str(old) == str(new):
+        if _fmt(old) == _fmt(new):
             continue
         projects.loc[mask, field] = new
-        audit.append(_entry(role, "edit", pid, field, old, new))
-        summary.append(f"{field}: {old!s} → {new!s}")
+        action = "seed" if field in SCHEDULE_SEED_FIELDS else "edit"
+        audit.append(_entry(role, action, pid, field, old, new))
+        summary.append(f"{field}: {_fmt(old) or '—'} → {_fmt(new) or '—'}")
 
     if audit:
         _write(projects, gates)
@@ -260,92 +228,135 @@ def update_project(role: str, pid: str, changes: dict) -> list[str]:
     return summary
 
 
-class ValidationError(ValueError):
-    pass
+def replan_gates(role: str, pid: str) -> list[str]:
+    """
+    Recalculate every gate's PLAN date from the project's Gate Zero, PPAP and
+    SOP dates. Adjusted and Actual dates are left untouched - this resets the
+    auto-calculated baseline, not the record of what happened.
+    """
+    projects, gates = lm.load_bundled()
+    proj = projects[projects["project_id"] == pid]
+    if proj.empty:
+        raise KeyError(f"No project {pid}")
+    p = proj.iloc[0]
+
+    if pd.isna(p["gate_zero_date"]):
+        raise ValidationError("This project has no Gate Zero date to plan from.")
+
+    plan = gs.planned_dates(
+        p["project_type"], p["launch_type"],
+        p["gate_zero_date"], p["ppap_target_date"], p["sop_target_date"],
+    )
+
+    audit, summary = [], []
+    for idx, g in gates[gates["project_id"] == pid].iterrows():
+        code = g["gate_code"]
+        if code not in plan:
+            continue
+        old, new = g["plan_date"], plan[code]
+        if _fmt(old) == _fmt(new):
+            continue
+        gates.at[idx, "plan_date"] = new
+        audit.append(_entry(role, "replan", pid, f"{code}.plan_date", old, new))
+        summary.append(f"Gate {code} plan: {_fmt(old) or '—'} → {_fmt(new)}")
+
+    if audit:
+        _write(projects, gates)
+        append_audit(audit)
+    return summary
 
 
-def _clean_gate_frame(pid: str, edited: pd.DataFrame) -> pd.DataFrame:
-    """Coerce the edited grid into storable rows, raising on bad input."""
+def _coerce_gate_frame(pid: str, edited: pd.DataFrame, full: bool) -> pd.DataFrame:
     df = edited.copy()
-
-    for col in GATE_EDIT_COLUMNS:
+    required = GATE_EDIT_COLUMNS if full else ["gate_no"] + GATE_DATE_COLUMNS
+    for col in required:
         if col not in df.columns:
             raise ValidationError(f"Gate grid is missing the {col} column.")
 
-    # Drop rows the editor added but left empty.
-    df = df.dropna(subset=["gate_no", "gate_code", "original_week"], how="all")
-    if df.empty:
-        raise ValidationError("A project must keep at least one gate.")
-
-    for col in ["gate_no", "gate_code", "original_week"]:
-        if df[col].isna().any():
-            raise ValidationError(f"Every gate needs a {col.replace('_', ' ')}.")
-
-    df["gate_code"] = df["gate_code"].astype(str).str.strip()
-    df["gate_name"] = df["gate_name"].fillna("").astype(str).str.strip()
-    if (df["gate_code"] == "").any():
-        raise ValidationError("Gate code cannot be blank — it is the dot label.")
-
-    for col in _INT_GATE_FIELDS:
-        df[col] = df[col].astype(float).round().astype(int)
-    for col in _NULLABLE_INT_GATE_FIELDS:
-        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-
-    df["qa_lab_hours"] = (
-        pd.to_numeric(df["qa_lab_hours"], errors="coerce").fillna(0.0).astype(float)
-    )
-
-    if df["gate_no"].duplicated().any():
-        dupes = sorted({int(v) for v in df.loc[df["gate_no"].duplicated(), "gate_no"]})
-        raise ValidationError(
-            "Gate number must be unique within a project. Duplicated: "
-            + ", ".join(str(d) for d in dupes)
+    if full:
+        df = df.dropna(subset=["gate_no", "gate_code"], how="all")
+        if df.empty:
+            raise ValidationError("A project must keep at least one gate.")
+        if df["gate_no"].isna().any() or df["gate_code"].isna().any():
+            raise ValidationError("Every gate needs an order number and a code.")
+        df["gate_code"] = df["gate_code"].astype(str).str.strip()
+        df["gate_name"] = df["gate_name"].fillna("").astype(str).str.strip()
+        if (df["gate_code"] == "").any():
+            raise ValidationError("Gate code cannot be blank — it is the dot label.")
+        df["gate_no"] = df["gate_no"].astype(float).round().astype(int)
+        if df["gate_no"].duplicated().any():
+            dupes = sorted({int(v) for v in df.loc[df["gate_no"].duplicated(), "gate_no"]})
+            raise ValidationError(
+                "Gate order must be unique. Duplicated: "
+                + ", ".join(str(d) for d in dupes)
+            )
+        df["qa_lab_hours"] = (
+            pd.to_numeric(df["qa_lab_hours"], errors="coerce").fillna(0.0).astype(float)
         )
+        if (df["qa_lab_hours"] < 0).any():
+            raise ValidationError("QA lab hours cannot be negative.")
+    else:
+        df["gate_no"] = df["gate_no"].astype(float).round().astype(int)
 
-    for col in ["original_week"] + _NULLABLE_INT_GATE_FIELDS:
-        bad = df[col].dropna()
-        if len(bad) and ((bad < 1) | (bad > 52)).any():
-            raise ValidationError(f"{col.replace('_', ' ').title()} must be 1–52.")
+    for col in GATE_DATE_COLUMNS:
+        df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-    if (df["qa_lab_hours"] < 0).any():
-        raise ValidationError("QA lab hours cannot be negative.")
+    if df["plan_date"].isna().any():
+        raise ValidationError("Every gate needs a plan date.")
 
     df["project_id"] = pid
-    return df[["project_id"] + GATE_EDIT_COLUMNS].sort_values(
-        "gate_no", ignore_index=True
-    )
+    return df.sort_values("gate_no", ignore_index=True)
+
+
+def save_gate_dates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
+    """Update Plan / Adjusted / Actual for existing gates. No add or remove."""
+    projects, gates = lm.load_bundled()
+    new = _coerce_gate_frame(pid, edited, full=False).set_index("gate_no")
+
+    audit, summary = [], []
+    for idx, g in gates[gates["project_id"] == pid].iterrows():
+        gate_no = int(g["gate_no"])
+        if gate_no not in new.index:
+            continue
+        for field in GATE_DATE_COLUMNS:
+            old, new_val = g[field], new.loc[gate_no, field]
+            if _fmt(old) == _fmt(new_val):
+                continue
+            gates.at[idx, field] = new_val
+            action = "baseline" if field == BASELINE_FIELD else "edit"
+            audit.append(_entry(role, action, pid, f"{g['gate_code']}.{field}", old, new_val))
+            prefix = "⚠ plan " if action == "baseline" else ""
+            summary.append(
+                f"{prefix}Gate {g['gate_code']} {field.replace('_date','')}: "
+                f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
+            )
+
+    if audit:
+        _write(projects, gates)
+        append_audit(audit)
+    return summary
 
 
 def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
-    """
-    Replace the whole gate set for one project.
-
-    Handles added rows, deleted rows and field edits. Every difference is
-    audited; changes to original_week are logged as `baseline` so a rewritten
-    commitment stays visible next to ordinary edits.
-    """
+    """Advanced: replace the whole gate set, handling adds and removals."""
     projects, gates = lm.load_bundled()
-    new = _clean_gate_frame(pid, edited)
+    new = _coerce_gate_frame(pid, edited, full=True)
 
     current = gates[gates["project_id"] == pid].set_index("gate_no")
     incoming = new.set_index("gate_no")
-
     audit, summary = [], []
 
-    removed = sorted(set(current.index) - set(incoming.index))
-    for gate_no in removed:
+    for gate_no in sorted(set(current.index) - set(incoming.index)):
         code = current.loc[gate_no, "gate_code"]
         audit.append(_entry(role, "delete", pid, f"gate {code}", code, ""))
         summary.append(f"Removed gate {code}")
 
-    added = sorted(set(incoming.index) - set(current.index))
-    for gate_no in added:
+    for gate_no in sorted(set(incoming.index) - set(current.index)):
         row = incoming.loc[gate_no]
         audit.append(
-            _entry(role, "create", pid, f"gate {row['gate_code']}", "",
-                   f"wk {row['original_week']}")
+            _entry(role, "create", pid, f"gate {row['gate_code']}", "", row["plan_date"])
         )
-        summary.append(f"Added gate {row['gate_code']} at wk {row['original_week']}")
+        summary.append(f"Added gate {row['gate_code']} on {_fmt(row['plan_date'])}")
 
     for gate_no in sorted(set(current.index) & set(incoming.index)):
         old_row, new_row = current.loc[gate_no], incoming.loc[gate_no]
@@ -353,23 +364,18 @@ def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
             if field == "gate_no":
                 continue
             old, new_val = old_row[field], new_row[field]
-            if pd.isna(old) and pd.isna(new_val):
-                continue
-            if not pd.isna(old) and not pd.isna(new_val):
-                if field == "qa_lab_hours":
-                    if abs(float(old) - float(new_val)) < 0.05:
-                        continue
-                elif str(old) == str(new_val):
+            if field == "qa_lab_hours":
+                if abs(float(old or 0) - float(new_val or 0)) < 0.05:
                     continue
+            elif _fmt(old) == _fmt(new_val):
+                continue
             action = "baseline" if field == BASELINE_FIELD else "edit"
-            label = f"{old_row['gate_code']}.{field}"
-            audit.append(_entry(role, action, pid, label, old, new_val))
-            shown_old = "—" if pd.isna(old) else old
-            shown_new = "—" if pd.isna(new_val) else new_val
-            prefix = "⚠ baseline " if action == "baseline" else ""
+            audit.append(
+                _entry(role, action, pid, f"{old_row['gate_code']}.{field}", old, new_val)
+            )
             summary.append(
-                f"{prefix}Gate {old_row['gate_code']} "
-                f"{field.replace('_', ' ')}: {shown_old} → {shown_new}"
+                f"Gate {old_row['gate_code']} {field.replace('_', ' ')}: "
+                f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
             )
 
     if audit:
@@ -377,15 +383,7 @@ def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
         gates = pd.concat(
             [others, new.reindex(columns=others.columns)], ignore_index=True
         )
-        for col in _NULLABLE_INT_GATE_FIELDS + ["gate_no", "original_week"]:
-            gates[col] = pd.to_numeric(gates[col], errors="coerce").astype(
-                "Int64" if col in _NULLABLE_INT_GATE_FIELDS else "int64"
-            )
+        gates["gate_no"] = gates["gate_no"].astype(int)
         _write(projects, gates)
         append_audit(audit)
     return summary
-
-
-# Kept for callers that only touch dates.
-def update_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
-    return replace_gates(role, pid, edited)
