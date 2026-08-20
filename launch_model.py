@@ -32,6 +32,15 @@ GATE_COLUMNS = [
     "plan_date", "adjusted_date", "actual_date", "qa_lab_hours",
 ]
 
+# The tracker sheet carries a hand-typed status per gate (G / Y / R / N/A).
+# It is kept as an override; when blank, status is derived from the dates.
+STATUS_OVERRIDE_MAP = {
+    "G": "Complete", "Y": "In progress", "R": "Behind",
+    "GREEN": "Complete", "YELLOW": "In progress", "RED": "Behind",
+}
+
+PROJECT_PHASES = ["In-Process", "Complete", "On Hold", "Cancelled"]
+
 PROJECT_TYPES = ["Launch", "Prototype"]
 # "Prototype" is a launch_type in its own right - prototypes are neither full
 # nor simple, and labelling them n/a read as a bug.
@@ -48,7 +57,13 @@ OPTIONAL_PROJECT_FIELDS = {
     "launch_risk": "", "cer_status": "", "cer_number": "", "notes": "",
     "rpn": 0, "peak_annual_sales": 0.0, "qmsi_capex": 0.0, "cer_amount": 0.0,
     "prr_amount_first_year": 0.0,
+    # Added after seeing the real tracker sheet.
+    "project_phase": "In-Process",   # sheet column I: In-Process / Complete
+    "gate_zero_corp": "",            # Gate Zero form: corporate approver
+    "main_risk_comments": "",        # Gate Zero form: main risk comments
 }
+
+OPTIONAL_GATE_FIELDS = {"status_override": ""}
 
 
 class SchemaError(ValueError):
@@ -110,6 +125,10 @@ def load_gates(source) -> pd.DataFrame:
     for col in DATE_COLUMNS_GATES:
         df[col] = _to_date(df[col])
     df["qa_lab_hours"] = pd.to_numeric(df["qa_lab_hours"], errors="coerce").fillna(0.0)
+    for col, fill in OPTIONAL_GATE_FIELDS.items():
+        if col not in df.columns:
+            df[col] = fill
+        df[col] = df[col].fillna(fill).astype(str).str.strip()
     return df
 
 
@@ -144,6 +163,17 @@ def annotate_gates(gates: pd.DataFrame, as_of: date) -> pd.DataFrame:
     g["status"] = IN_PROGRESS
     g.loc[g["is_complete"], "status"] = COMPLETE
     g.loc[g["is_behind"], "status"] = BEHIND
+
+    # A hand-typed status on the tracker sheet wins over the derived one.
+    if "status_override" in g.columns:
+        override = (
+            g["status_override"].fillna("").astype(str).str.strip().str.upper()
+            .map(STATUS_OVERRIDE_MAP)
+        )
+        g["status"] = override.where(override.notna(), g["status"])
+        g["status_is_override"] = override.notna()
+    else:
+        g["status_is_override"] = False
 
     g["days_late"] = 0
     behind = g["is_behind"]

@@ -83,8 +83,15 @@ def append_audit(rows: list[dict]) -> None:
 
 
 def _fmt(v) -> str:
-    if v is None or (not isinstance(v, (str, date)) and pd.isna(v)):
+    # pd.NaT subclasses datetime, so the null check has to come first or an
+    # empty date is written to the audit log as the string "NaT".
+    if v is None:
         return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
     if isinstance(v, date):
         return v.isoformat()
     return str(v)

@@ -21,10 +21,18 @@ import auth
 import gate_schedule as gs
 import launch_model as lm
 import store
+import tracker_import
 from config import PROJECT_STATUS_ICON, SIMPLE_LAUNCH_TAG, today
 from launch_charts import gate_status_bars, gate_timeline, qa_lab_chart
 
 NOW = today()
+
+
+def _d(value):
+    """date_input rejects pandas NaT, so empty dates must become None."""
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value).date()
 
 
 @st.cache_data
@@ -341,8 +349,9 @@ else:
         "Every change is recorded in the audit log below."
     )
 
-    tab_edit, tab_gate0, tab_proto = st.tabs(
-        ["Edit existing", "Add New Gate Zero", "Add New Prototype"]
+    tab_edit, tab_gate0, tab_proto, tab_import = st.tabs(
+        ["Edit existing", "Add New Gate Zero", "Add New Prototype",
+         "Import tracker workbook"]
     )
 
     # -- edit existing --------------------------------------------------
@@ -417,11 +426,11 @@ else:
 
             st.markdown("**Schedule seeds** — these drive every planned gate date")
             c21, c22, c23 = st.columns(3)
-            e_g0 = c21.date_input("Gate Zero date", rec["gate_zero_date"] or NOW)
+            e_g0 = c21.date_input("Gate Zero date", _d(rec["gate_zero_date"]) or NOW)
             e_ppap = c22.date_input(
-                "PPAP date (Gate 3)", rec["ppap_target_date"] or NOW
+                "PPAP date (Gate 3)", _d(rec["ppap_target_date"]) or NOW
             )
-            e_sop = c23.date_input("SOP date (Gate 4)", rec["sop_target_date"] or NOW)
+            e_sop = c23.date_input("SOP date (Gate 4)", _d(rec["sop_target_date"]) or NOW)
 
             st.markdown("**Status and outcome**")
             c24, c25, c26 = st.columns(3)
@@ -479,42 +488,74 @@ else:
                 else:
                     st.info("Nothing changed.")
 
-        # -- gate dates -------------------------------------------------
-        # Outside the form on purpose: data_editor edits do not register
-        # until a form is submitted, which made this confusing before.
+        # -- gate dates -----------------------------------------------------
+        # Plain date fields, one row per gate. No grid: the spreadsheet-style
+        # editor was unreadable and its edits did not register until submit.
         st.markdown("**Gate dates**")
         st.caption(
-            "Plan is auto-calculated from the three schedule seeds above. "
-            "Put slips in Adjusted and completions in Actual. "
-            "On-time uses Adjusted when present, otherwise Plan."
+            "Three dates per gate, exactly like the tracker sheet. "
+            "**Plan** is auto-calculated from the Gate Zero, PPAP and SOP "
+            "dates above. **Adjusted** is a slip. **Actual** is when it "
+            "actually happened. On-time uses Adjusted when set, otherwise Plan."
         )
 
-        gsub = (
+        pick_gates = (
             gates_all[gates_all["project_id"] == pick]
-            .sort_values("gate_no")[
-                ["gate_no", "gate_code", "gate_name"] + store.GATE_DATE_COLUMNS
-            ]
+            .sort_values("gate_no")
             .reset_index(drop=True)
         )
 
-        edited = st.data_editor(
-            gsub, width="stretch", hide_index=True,
-            disabled=["gate_no", "gate_code", "gate_name"],
-            column_config={
-                "gate_no": None,
-                "gate_code": st.column_config.TextColumn("Gate", width="small"),
-                "gate_name": st.column_config.TextColumn("Name", width="medium"),
-                "plan_date": st.column_config.DateColumn("Plan", width="small"),
-                "adjusted_date": st.column_config.DateColumn("Adjusted", width="small"),
-                "actual_date": st.column_config.DateColumn("Actual", width="small"),
-            },
-            key=f"gd_{pick}",
-        )
+        with st.form(f"gate_dates_{pick}"):
+            h = st.columns([2.4, 1.5, 1.5, 1.5, 1.1])
+            h[0].caption("Gate")
+            h[1].caption("Plan")
+            h[2].caption("Adjusted")
+            h[3].caption("Actual")
+            h[4].caption("Clear")
 
-        gc1, gc2 = st.columns([1, 3])
-        if gc1.button("Save gate dates", key=f"sg_{pick}"):
+            entries = []
+            for gr in pick_gates.itertuples():
+                c = st.columns([2.4, 1.5, 1.5, 1.5, 1.1])
+                c[0].markdown(
+                    f"**{gr.gate_code}** &nbsp; {gr.gate_name}",
+                    unsafe_allow_html=True,
+                )
+                plan = c[1].date_input(
+                    f"Plan {gr.gate_code}", value=_d(gr.plan_date),
+                    key=f"pl_{pick}_{gr.gate_no}", label_visibility="collapsed",
+                )
+                adjusted = c[2].date_input(
+                    f"Adjusted {gr.gate_code}", value=_d(gr.adjusted_date),
+                    key=f"ad_{pick}_{gr.gate_no}", label_visibility="collapsed",
+                )
+                actual = c[3].date_input(
+                    f"Actual {gr.gate_code}", value=_d(gr.actual_date),
+                    key=f"ac_{pick}_{gr.gate_no}", label_visibility="collapsed",
+                )
+                clear_adj = c[4].checkbox(
+                    "adj", key=f"ca_{pick}_{gr.gate_no}",
+                    help="Clear the adjusted date on save.",
+                )
+                clear_act = c[4].checkbox(
+                    "act", key=f"cc_{pick}_{gr.gate_no}",
+                    help="Clear the actual date on save — reopens the gate.",
+                )
+                entries.append(
+                    {
+                        "gate_no": gr.gate_no,
+                        "plan_date": plan,
+                        "adjusted_date": None if clear_adj else adjusted,
+                        "actual_date": None if clear_act else actual,
+                    }
+                )
+
+            save_gates = st.form_submit_button("Save gate dates")
+
+        if save_gates:
             try:
-                gate_changes = store.save_gate_dates(role, pick, edited)
+                gate_changes = store.save_gate_dates(
+                    role, pick, pd.DataFrame(entries)
+                )
             except store.ValidationError as exc:
                 st.error(str(exc))
             except Exception as exc:
@@ -527,7 +568,7 @@ else:
                 else:
                     st.info("No gate changes to save.")
 
-        if gc2.button(
+        if st.button(
             "Recalculate plan dates from Gate Zero / PPAP / SOP", key=f"rp_{pick}"
         ):
             try:
@@ -542,38 +583,37 @@ else:
                 else:
                     st.info("Plan dates already match the schedule seeds.")
 
-        with st.expander("Advanced — change which gates this project has"):
+        with st.expander("Advanced — add or remove gates"):
             st.caption(
                 "Only needed when a project does not follow the standard "
-                "route. Add a row to create a gate, use the trash icon to "
-                "remove one. Code is the label inside the timeline dot."
+                "route. Everything else is on the form above."
             )
-            adv = (
-                gates_all[gates_all["project_id"] == pick]
-                .sort_values("gate_no")[store.GATE_EDIT_COLUMNS]
-                .reset_index(drop=True)
-            )
+            adv = pick_gates[
+                ["gate_no", "gate_code", "gate_name", "plan_date"]
+            ].copy()
             adv_edited = st.data_editor(
                 adv, width="stretch", hide_index=True, num_rows="dynamic",
                 column_config={
                     "gate_no": st.column_config.NumberColumn("Order", width="small"),
                     "gate_code": st.column_config.TextColumn(
-                        "Code", width="small", max_chars=2
+                        "Code", width="small", max_chars=2,
+                        help="Label inside the timeline dot.",
                     ),
                     "gate_name": st.column_config.TextColumn("Name"),
                     "plan_date": st.column_config.DateColumn("Plan", width="small"),
-                    "adjusted_date": st.column_config.DateColumn("Adjusted", width="small"),
-                    "actual_date": st.column_config.DateColumn("Actual", width="small"),
-                    "qa_lab_hours": st.column_config.NumberColumn(
-                        "QA lab h", min_value=0.0, step=1.0, format="%.1f",
-                        width="small",
-                    ),
                 },
                 key=f"adv_{pick}",
             )
             if st.button("Save gate structure", key=f"sa_{pick}"):
+                merged = adv_edited.merge(
+                    pick_gates[
+                        ["gate_no", "adjusted_date", "actual_date", "qa_lab_hours"]
+                    ],
+                    on="gate_no", how="left",
+                )
+                merged["qa_lab_hours"] = merged["qa_lab_hours"].fillna(0.0)
                 try:
-                    adv_changes = store.replace_gates(role, pick, adv_edited)
+                    adv_changes = store.replace_gates(role, pick, merged)
                 except store.ValidationError as exc:
                     st.error(str(exc))
                 except Exception as exc:
@@ -724,6 +764,77 @@ else:
                 else:
                     st.cache_data.clear()
                     st.success(f"Created {pid}.")
+                    st.rerun()
+
+    # -- import the real tracker workbook --------------------------------
+    with tab_import:
+        st.caption(
+            "Reads the **Project Launch Tracker** sheet and joins the "
+            "**Gate Zero Summary** sheet on customer part number. This "
+            "**replaces** everything currently loaded."
+        )
+        st.warning(
+            "Only do this on a local or internal deployment. The workbook "
+            "carries live part numbers and customer names, which should not "
+            "be uploaded to a public host.",
+            icon="🔒",
+        )
+
+        up = st.file_uploader(
+            "Tracker workbook (.xlsm or .xlsx)", type=["xlsm", "xlsx"],
+            key="tracker_upload",
+        )
+        if up is not None:
+            try:
+                imported_p, imported_g, import_warnings = tracker_import.parse(up)
+            except tracker_import.ImportError_ as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Could not read that workbook: {exc}")
+            else:
+                st.success(
+                    f"Parsed **{len(imported_p)} projects** and "
+                    f"**{len(imported_g)} gates**."
+                )
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Projects", len(imported_p))
+                m2.metric("Gates", len(imported_g))
+                m3.metric("Warnings", len(import_warnings))
+
+                st.dataframe(
+                    imported_p[
+                        ["project_id", "project_name", "plant", "launch_type",
+                         "program_manager", "project_phase", "project_status",
+                         "gate_zero_date", "ppap_target_date", "sop_target_date"]
+                    ].head(30),
+                    width="stretch", hide_index=True,
+                )
+
+                if import_warnings:
+                    with st.expander(f"{len(import_warnings)} warnings"):
+                        for wmsg in import_warnings:
+                            st.write("•", wmsg)
+
+                st.caption(
+                    "Nothing has been written yet. Confirm below to replace "
+                    "the loaded data."
+                )
+                if st.button("Replace loaded data with this import"):
+                    tracker_import.write(imported_p, imported_g)
+                    store.append_audit(
+                        [
+                            {
+                                "timestamp": pd.Timestamp.now().isoformat(
+                                    timespec="seconds"
+                                ),
+                                "role": role, "action": "import",
+                                "project_id": "*", "field": "workbook",
+                                "old_value": "", "new_value": up.name,
+                            }
+                        ]
+                    )
+                    st.cache_data.clear()
+                    st.success("Imported. Reloading.")
                     st.rerun()
 
     # -- audit log ------------------------------------------------------

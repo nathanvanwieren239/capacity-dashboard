@@ -82,10 +82,33 @@ as the leading circle on each row.
 Signed in as **editor**, the Launch Portfolio page has a Data entry section:
 
 - **Edit existing** — project fields, the Gate Zero form fields, schedule
-  seeds, and a plain Plan/Adjusted/Actual date grid. An *Advanced* expander
-  changes which gates a project has, for anything off the standard route.
+  seeds, and a **plain gate date form**: one row per gate with three date
+  pickers (Plan / Adjusted / Actual) and clear checkboxes. An *Advanced*
+  expander adds or removes gates, for anything off the standard route.
 - **Add New Gate Zero** — creates a launch and calculates its whole schedule.
 - **Add New Prototype** — creates a prototype.
+- **Import tracker workbook** — reads the real Project Launch Tracker sheet.
+
+### Importing the real tracker
+
+```bash
+python tracker_import.py "path/to/tracker.xlsm"
+```
+
+or use the *Import tracker workbook* tab as an editor. It reads the
+**Project Launch Tracker** sheet and joins **Gate Zero Summary-NA&SA** on
+customer part number for launch process and sales fields. Column mapping is
+documented at the top of `tracker_import.py`.
+
+The importer is deliberately tolerant: columns A–G are formula-driven, and in
+a sanitised copy those formulas come back as `#REF!`. Rather than dropping
+those rows it keeps whatever survived — job number, PM, gate dates, notes —
+labels the project by job number, recovers the kickoff from the earliest gate
+date, and reports exactly what it had to guess. Nothing is written until you
+confirm.
+
+🔒 Import only on a local or internal deployment. The workbook carries live
+part numbers and customer names.
 
 Changes write to `data/projects.csv` and `data/gates.csv` and appear
 immediately. Every change is appended to `data/audit_log.csv` with a
@@ -117,6 +140,7 @@ one module changes and nothing else has to.
 | `launch_charts.py` | Plotly figures, renderable outside Streamlit |
 | `launch_data.py` | Synthetic portfolio data + the column contract |
 | `store.py` | The only module that writes. Swap to change source of truth |
+| `tracker_import.py` | Reads the real Gate Zero / Project Launch Tracker workbook |
 | `preview.py` | Renders the launch charts to `preview/` as static HTML |
 | `capacity_model.py`, `synthetic_data.py` | The future-state capacity page |
 
@@ -127,7 +151,9 @@ one module changes and nothing else has to.
   toggle by default.
 - The PRR metric is a raw count within 12 months of SOP. Review suggested a
   rate or percentage; the denominator hasn't been decided.
-- All names, part numbers, customers and job numbers are fake.
+- All bundled data is invented. Real data arrives via the importer.
+- The per-gate status typed on the sheet (G/Y/N/A) is honoured as an
+  override; otherwise status is derived from the dates.
 
 ## Open questions
 
