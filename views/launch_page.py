@@ -356,16 +356,26 @@ else:
 
     # -- edit existing --------------------------------------------------
     with tab_edit:
+        def _pick_label(i: str) -> str:
+            r = projects_all.loc[projects_all["project_id"] == i].iloc[0]
+            icon = PROJECT_STATUS_ICON.get(r["project_status"], "")
+            return f"{icon} {i} · {r['project_name']} · {r['plant']} · {r['program_manager']}"
+
         pick = st.selectbox(
-            "Project", projects_all["project_id"].tolist(),
-            format_func=lambda i: (
-                f"{i} — {projects_all.loc[projects_all['project_id'] == i, 'project_name'].iloc[0]}"
-            ),
+            "Which project are you editing?",
+            projects_all.sort_values(["plant", "project_name"])["project_id"].tolist(),
+            format_func=_pick_label,
             key="edit_pick",
+            help="Type to search by part number, description, plant or PM.",
         )
         rec = projects_all[projects_all["project_id"] == pick].iloc[0]
 
         with st.form("edit_project"):
+            st.markdown(f"### Editing — {rec['project_name']}")
+            st.caption(
+                f"`{pick}` · {rec['plant']} · PM {rec['program_manager']} · "
+                f"{rec['launch_type']} launch"
+            )
             st.markdown("**Project**")
             c1, c2, c3 = st.columns(3)
             e_part = c1.text_input("Customer part number", str(rec["customer_part_number"]))
@@ -491,7 +501,14 @@ else:
         # -- gate dates -----------------------------------------------------
         # Plain date fields, one row per gate. No grid: the spreadsheet-style
         # editor was unreadable and its edits did not register until submit.
-        st.markdown("**Gate dates**")
+        # The project picker is at the top of the tab and scrolls out of
+        # sight, so every editable block restates which project it is on.
+        st.markdown(f"### Gate dates — {rec['project_name']}")
+        st.caption(
+            f"`{pick}` · {rec['plant']} · PM {rec['program_manager']} · "
+            f"Job {rec['job_number'] or '—'} · "
+            f"{rec['launch_type']} launch · {rec['project_phase']}"
+        )
         st.caption(
             "Three dates per gate, exactly like the tracker sheet. "
             "**Plan** is auto-calculated from the Gate Zero, PPAP and SOP "
@@ -549,7 +566,7 @@ else:
                     }
                 )
 
-            save_gates = st.form_submit_button("Save gate dates")
+            save_gates = st.form_submit_button(f"Save gate dates for {pick}")
 
         if save_gates:
             try:
@@ -583,7 +600,7 @@ else:
                 else:
                     st.info("Plan dates already match the schedule seeds.")
 
-        with st.expander("Advanced — add or remove gates"):
+        with st.expander(f"Advanced — add or remove gates on {pick}"):
             st.caption(
                 "Only needed when a project does not follow the standard "
                 "route. Everything else is on the form above."
