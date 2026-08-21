@@ -18,12 +18,14 @@ the only one that changes.
 from __future__ import annotations
 
 from datetime import date, datetime
+from functools import wraps
 from pathlib import Path
 
 import pandas as pd
 
 import gate_schedule as gs
 import launch_model as lm
+import safe_io
 
 DATA_DIR = Path(__file__).parent / "data"
 PROJECTS_CSV = DATA_DIR / "projects.csv"
@@ -65,6 +67,23 @@ class ValidationError(ValueError):
     pass
 
 
+def _guarded(fn):
+    """
+    Serialise a whole read-modify-write.
+
+    The lock must span the read as well as the write. Locking only the write
+    still lets a stale read overwrite a change made in between - which is
+    exactly the lost update this is here to prevent.
+    """
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with safe_io.data_lock():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
@@ -79,7 +98,7 @@ def append_audit(rows: list[dict]) -> None:
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=AUDIT_COLUMNS)
-    df.to_csv(AUDIT_CSV, mode="a", header=not AUDIT_CSV.exists(), index=False)
+    safe_io.atomic_append_csv(df, AUDIT_CSV, AUDIT_COLUMNS)
 
 
 def _fmt(v) -> str:
@@ -118,7 +137,7 @@ def _iso(v):
     return pd.Timestamp(v).date().isoformat()
 
 
-def _write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
+def _write(projects: pd.DataFrame, gates: pd.DataFrame, reason: str = "") -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     p, g = projects.copy(), gates.copy()
     for col in lm.DATE_COLUMNS_PROJECTS:
@@ -126,8 +145,11 @@ def _write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
             p[col] = p[col].map(_iso)
     for col in lm.DATE_COLUMNS_GATES:
         g[col] = g[col].map(_iso)
-    p.to_csv(PROJECTS_CSV, index=False)
-    g.to_csv(GATES_CSV, index=False)
+    # Snapshot the last known good state, then write so an interruption
+    # cannot leave a half-written file behind.
+    safe_io.backup(reason=reason)
+    safe_io.atomic_write_csv(p, PROJECTS_CSV)
+    safe_io.atomic_write_csv(g, GATES_CSV)
 
 
 def _append(df: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
@@ -147,6 +169,7 @@ def next_project_id(projects: pd.DataFrame, is_prototype: bool) -> str:
     return f"{prefix}-{(int(nums.max()) + 7) if len(nums) else 1000}"
 
 
+@_guarded
 def create_project(*, role: str, fields: dict) -> str:
     """
     Create a project and auto-calculate its whole gate schedule from the
@@ -196,7 +219,7 @@ def create_project(*, role: str, fields: dict) -> str:
 
     projects = _append(projects, [row])
     gates = _append(gates, new_gates)
-    _write(projects, gates)
+    _write(projects, gates, reason="create")
 
     append_audit(
         [
@@ -209,6 +232,7 @@ def create_project(*, role: str, fields: dict) -> str:
     return pid
 
 
+@_guarded
 def update_project(role: str, pid: str, changes: dict) -> list[str]:
     projects, gates = lm.load_bundled()
     mask = projects["project_id"] == pid
@@ -230,11 +254,12 @@ def update_project(role: str, pid: str, changes: dict) -> list[str]:
         summary.append(f"{field}: {_fmt(old) or '—'} → {_fmt(new) or '—'}")
 
     if audit:
-        _write(projects, gates)
+        _write(projects, gates, reason="edit")
         append_audit(audit)
     return summary
 
 
+@_guarded
 def replan_gates(role: str, pid: str) -> list[str]:
     """
     Recalculate every gate's PLAN date from the project's Gate Zero, PPAP and
@@ -268,7 +293,7 @@ def replan_gates(role: str, pid: str) -> list[str]:
         summary.append(f"Gate {code} plan: {_fmt(old) or '—'} → {_fmt(new)}")
 
     if audit:
-        _write(projects, gates)
+        _write(projects, gates, reason="replan")
         append_audit(audit)
     return summary
 
@@ -315,6 +340,7 @@ def _coerce_gate_frame(pid: str, edited: pd.DataFrame, full: bool) -> pd.DataFra
     return df.sort_values("gate_no", ignore_index=True)
 
 
+@_guarded
 def save_gate_dates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
     """Update Plan / Adjusted / Actual for existing gates. No add or remove."""
     projects, gates = lm.load_bundled()
@@ -339,11 +365,12 @@ def save_gate_dates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
             )
 
     if audit:
-        _write(projects, gates)
+        _write(projects, gates, reason="gate-dates")
         append_audit(audit)
     return summary
 
 
+@_guarded
 def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
     """Advanced: replace the whole gate set, handling adds and removals."""
     projects, gates = lm.load_bundled()
@@ -391,6 +418,6 @@ def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
             [others, new.reindex(columns=others.columns)], ignore_index=True
         )
         gates["gate_no"] = gates["gate_no"].astype(int)
-        _write(projects, gates)
+        _write(projects, gates, reason="gate-structure")
         append_audit(audit)
     return summary

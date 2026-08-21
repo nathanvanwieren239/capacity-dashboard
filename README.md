@@ -116,11 +116,30 @@ timestamp, role, field, old and new value. Actions are tagged: `baseline` for
 a hand-edited plan date, `replan` for an auto-recalculation, `seed` for a
 change to the Gate Zero / PPAP / SOP dates.
 
+### Write safety
+
+Every save goes through `safe_io.py`:
+
+- **An exclusive lock** spans the whole read-modify-write, so two editors
+  saving at once queue instead of silently overwriting each other.
+- **Atomic writes** — a temp file is written, flushed, then renamed over the
+  target. An interruption leaves the old file intact, never a fragment.
+- **A timestamped snapshot** of all three data files before every write, in
+  `data/backups/`, keeping the most recent 40. `safe_io.restore(path)` puts
+  one back.
+
+Verified with 20 concurrent writers: all 20 changes landed, the audit chain
+was intact end to end, and a deliberately interrupted write left the target
+file untouched.
+
 ⚠️ **Persistence caveat.** Writes are durable on a machine you control — your
 laptop or an internal server. They are **not** durable on Streamlit Community
 Cloud: the container is rebuilt on every deploy and `data/*.csv` is
 gitignored, so a fresh container regenerates synthetic data. Edits made on the
 hosted demo will be lost.
+
+If this gets containerised for the internal server, `data/` **must** be on a
+mounted volume, not inside the container — otherwise nothing has changed.
 
 All file access is isolated in `store.py`. When the source of truth is settled
 — the Gate Zero Summary sheet on SharePoint, or an internal database — that
@@ -140,6 +159,7 @@ one module changes and nothing else has to.
 | `launch_charts.py` | Plotly figures, renderable outside Streamlit |
 | `launch_data.py` | Synthetic portfolio data + the column contract |
 | `store.py` | The only module that writes. Swap to change source of truth |
+| `safe_io.py` | Locking, atomic writes, rolling backups |
 | `tracker_import.py` | Reads the real Gate Zero / Project Launch Tracker workbook |
 | `preview.py` | Renders the launch charts to `preview/` as static HTML |
 | `capacity_model.py`, `synthetic_data.py` | The future-state capacity page |

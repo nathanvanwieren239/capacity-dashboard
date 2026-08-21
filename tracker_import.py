@@ -47,6 +47,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import safe_io
+
 DATA_DIR = Path(__file__).parent / "data"
 
 TRACKER_SHEET = "Project Launch Tracker"
@@ -346,6 +348,11 @@ def _iso(v):
 
 
 def write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
+    """
+    Replace the loaded data. This is the most destructive action in the app,
+    so it takes the lock and snapshots first - a bad import is then a restore
+    away rather than unrecoverable.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     p, g = projects.copy(), gates.copy()
     for col in ("gate_zero_date", "ppap_target_date", "sop_target_date",
@@ -353,8 +360,10 @@ def write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
         p[col] = p[col].map(_iso)
     for col in ("plan_date", "adjusted_date", "actual_date"):
         g[col] = g[col].map(_iso)
-    p.to_csv(DATA_DIR / "projects.csv", index=False)
-    g.to_csv(DATA_DIR / "gates.csv", index=False)
+    with safe_io.data_lock():
+        safe_io.backup(reason="pre-import")
+        safe_io.atomic_write_csv(p, DATA_DIR / "projects.csv")
+        safe_io.atomic_write_csv(g, DATA_DIR / "gates.csv")
 
 
 def main() -> None:

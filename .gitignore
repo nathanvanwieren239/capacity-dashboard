@@ -1,6 +1,8 @@
 # Generated demo data - app regenerates on first run
 data/*.csv
 data/audit_log.csv
+data/backups/
+data/.tracker.lock
 
 # Never commit real extracts
 data/real/
