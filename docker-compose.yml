@@ -71,14 +71,17 @@ services:
           cpus: "1.0"
           memory: 1G
 
-    # Container-level hardening. The application never writes outside
-    # /app/data, so the rest of the filesystem can stay read-only.
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /home/tracker/.streamlit
     security_opt:
       - no-new-privileges:true
+
+    # Optional extra hardening. The application never writes outside
+    # /app/data, so the rest of the filesystem can be read-only. Left
+    # commented because it has not been verified on this image — enable it,
+    # confirm the container starts and the app loads, then keep it.
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+    #   - /home/tracker/.streamlit
 
 volumes:
   tracker-data:

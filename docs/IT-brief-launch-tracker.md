@@ -3,7 +3,7 @@
 **For:** Mike Chambers, IT
 **From:** Nathan Van Wieren, Technical Business Development Engineer
 **Date:** 23 August 2026
-**Status:** Working prototype on synthetic data. Seeking guidance on internal hosting.
+**Status:** Complete and tested on synthetic data. Seeking guidance on internal hosting.
 
 ---
 
@@ -108,6 +108,17 @@ any exposure concern.
 Streamlit's public cloud contains **entirely synthetic data**. All real part
 numbers, customer names and figures were replaced before anything was hosted
 externally. Real data has never left the building.
+
+**Testing.** An automated suite (`run_tests.py`, 11 tests) covers the gate
+arithmetic against the real sheet, concurrent editing, backup verification,
+corruption detection, foreign keys and both access roles. It runs against an
+isolated copy in about 20 seconds and can be re-run any time.
+
+**Container files.** A Dockerfile, compose file and deployment guide are
+included — non-root user, healthcheck, and the data directory already mapped
+to a volume. **I have not been able to build the image**, as Docker isn't
+installed on my machine, so please treat those as a starting point rather
+than something verified. The application itself is tested.
 
 **Documentation.** Architecture, data model, deployment and recovery
 procedures are written up. Data exports to plain CSV, readable independently

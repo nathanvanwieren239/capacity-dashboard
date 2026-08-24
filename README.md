@@ -19,6 +19,37 @@ streamlit run app.py
 
 Demo data regenerates automatically if `data/` is empty.
 
+## Test
+
+```bash
+python run_tests.py           # 11 tests, ~20s, isolated from your real data
+python run_tests.py --quick   # skips the three that boot the app
+```
+
+Covers gate arithmetic against the real sheet, concurrent editing, backup
+verification, restore from total deletion, corruption detection, foreign keys
+and both roles. Full detail in **[docs/TEST-PLAN.md](docs/TEST-PLAN.md)**.
+
+## Deploy
+
+```bash
+export APP_PASSWORD_VIEWER='...'
+export APP_PASSWORD_EDITOR='...'
+docker compose up -d --build
+```
+
+Full instructions in **[DEPLOY.md](DEPLOY.md)** — configuration, storage,
+backups, reverse proxy, and troubleshooting.
+
+> **The one thing that matters:** everything the app writes lives in
+> `/app/data`, which **must** be a mounted volume. Inside the container it is
+> destroyed on every redeploy, silently. `docker-compose.yml` does this
+> correctly already.
+
+Passwords are read from the environment, or from `.streamlit/secrets.toml`
+if one is present. `.dockerignore` excludes both `data/` and any secrets file,
+so neither can be baked into an image.
+
 ## Logins
 
 Two dummy roles, read from Streamlit secrets. Never stored in this repo.
