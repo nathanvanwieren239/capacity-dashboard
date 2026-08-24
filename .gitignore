@@ -3,6 +3,9 @@ data/*.csv
 data/audit_log.csv
 data/backups/
 data/.tracker.lock
+data/tracker.db
+data/tracker.db-wal
+data/tracker.db-shm
 
 # Never commit real extracts
 data/real/
@@ -30,3 +33,4 @@ Thumbs.db
 
 # Generated static preview
 preview/
+data/backups/daily/

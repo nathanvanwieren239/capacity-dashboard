@@ -47,7 +47,10 @@ PROJECT_TYPES = ["Launch", "Prototype"]
 LAUNCH_TYPES = ["Full", "Simple", "Prototype"]
 
 COMPLETE, IN_PROGRESS, BEHIND = "Complete", "In progress", "Behind"
-GATE_STATUSES = [COMPLETE, IN_PROGRESS, BEHIND]
+DUE_SOON = "Due soon"
+
+# Order matters: this is the legend order and the precedence order.
+GATE_STATUSES = [COMPLETE, IN_PROGRESS, DUE_SOON, BEHIND]
 
 # Optional columns tolerated when absent, with their fill value.
 OPTIONAL_PROJECT_FIELDS = {
@@ -101,8 +104,14 @@ def _at_or_before(series: pd.Series, limit: date) -> pd.Series:
     return series.map(lambda v: _is_date(v) and v <= limit)
 
 
-def load_projects(source) -> pd.DataFrame:
-    df = pd.read_csv(source)
+def normalise_projects(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Coerce a raw projects frame into the shape the rest of the app expects.
+
+    Shared by the CSV loader and the database reader, so both produce
+    identical frames and nothing downstream can tell where rows came from.
+    """
+    df = df.copy()
     _require(df, PROJECT_COLUMNS, "projects")
     for col, fill in OPTIONAL_PROJECT_FIELDS.items():
         if col not in df.columns:
@@ -117,8 +126,8 @@ def load_projects(source) -> pd.DataFrame:
     return df
 
 
-def load_gates(source) -> pd.DataFrame:
-    df = pd.read_csv(source)
+def normalise_gates(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     _require(df, GATE_COLUMNS, "gates")
     df["gate_no"] = df["gate_no"].astype(int)
     df["gate_code"] = df["gate_code"].astype(str)
@@ -132,21 +141,60 @@ def load_gates(source) -> pd.DataFrame:
     return df
 
 
+def load_projects(source) -> pd.DataFrame:
+    """Read projects from a CSV path or buffer. Used by the importer."""
+    return normalise_projects(pd.read_csv(source))
+
+
+def load_gates(source) -> pd.DataFrame:
+    """Read gates from a CSV path or buffer. Used by the importer."""
+    return normalise_gates(pd.read_csv(source))
+
+
 def load_bundled() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    The application's single entry point for data. Reads the database.
+
+    On a fresh install the database will not exist yet, so it is built - from
+    the CSVs if they are present (an upgrade from the old file store), or
+    from generated demo data if not.
+    """
+    import db
+
+    if db.is_empty():
+        _bootstrap()
+    return normalise_projects(db.read_projects()), normalise_gates(db.read_gates())
+
+
+def _bootstrap() -> None:
+    """Create and fill the database on first run."""
+    import db
+
     proj_path, gate_path = DATA_DIR / "projects.csv", DATA_DIR / "gates.csv"
     if not (proj_path.exists() and gate_path.exists()):
         import launch_data
 
         launch_data.main()
-    return load_projects(proj_path), load_gates(gate_path)
+
+    projects = load_projects(proj_path)
+    gates = load_gates(gate_path)
+    known = set(projects["project_id"])
+    gates = gates[gates["project_id"].isin(known)]
+    db.replace_all(projects, gates)
 
 
 # ---------------------------------------------------------------------------
 # Derived fields
 # ---------------------------------------------------------------------------
-def annotate_gates(gates: pd.DataFrame, as_of: date) -> pd.DataFrame:
+def annotate_gates(
+    gates: pd.DataFrame, as_of: date, due_soon_days: int | None = None
+) -> pd.DataFrame:
     """
     Derive due date, status and on-time flags.
+
+    Four states, in precedence order: complete, behind, due soon, in progress.
+    "Due soon" is an open gate falling within `due_soon_days` — it is a
+    prompt, not a problem, which is why it is distinct from behind.
 
     DUE DATE falls back: adjusted_date if one exists, otherwise plan_date.
     ON TIME is measured against that due date - this is the definition
@@ -154,13 +202,25 @@ def annotate_gates(gates: pd.DataFrame, as_of: date) -> pd.DataFrame:
     (against the original plan) alongside it, so a project cannot quietly
     repair its record by moving its own target without that being visible.
     """
+    from config import DUE_SOON_DAYS
+
+    due_soon_days = DUE_SOON_DAYS if due_soon_days is None else due_soon_days
     g = gates.copy()
 
     g["due_date"] = g["adjusted_date"].where(g["adjusted_date"].notna(), g["plan_date"])
     g["is_complete"] = g["actual_date"].notna()
     g["is_behind"] = (~g["is_complete"]) & _before(g["due_date"], as_of)
 
+    # An open gate falling inside the look-ahead window is "coming up".
+    # Applied before the behind check so that a gate which is already late
+    # stays red rather than being softened to blue.
+    horizon = as_of + timedelta(days=due_soon_days)
+    g["is_due_soon"] = (
+        (~g["is_complete"]) & (~g["is_behind"]) & _between(g["due_date"], as_of, horizon)
+    )
+
     g["status"] = IN_PROGRESS
+    g.loc[g["is_due_soon"], "status"] = DUE_SOON
     g.loc[g["is_complete"], "status"] = COMPLETE
     g.loc[g["is_behind"], "status"] = BEHIND
 

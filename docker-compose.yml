@@ -1,0 +1,86 @@
+# Launch Tracker — deployment definition
+#
+#   docker compose up -d --build
+#
+# Everything IT needs to change is in this file. The image itself needs no
+# modification.
+
+services:
+  launch-tracker:
+    build: .
+    image: launch-tracker:latest
+    container_name: launch-tracker
+    restart: unless-stopped
+
+    ports:
+      # host:container — change the host port if 8501 is taken, or bind to
+      # 127.0.0.1:8501 if a reverse proxy sits in front.
+      - "8501:8501"
+
+    volumes:
+      # ─────────────────────────────────────────────────────────────────
+      # THE IMPORTANT LINE.
+      #
+      # Everything the application writes lives in /app/data — the SQLite
+      # database, the audit log, and the backup snapshots. This mount is
+      # what makes it survive a redeploy.
+      #
+      # `tracker-data` below is a Docker named volume, which is fine. To use
+      # a directory on the host instead — easier to include in an existing
+      # backup regime — replace this line with a bind mount, for example:
+      #     - /srv/launch-tracker/data:/app/data
+      # ─────────────────────────────────────────────────────────────────
+      - tracker-data:/app/data
+
+      # Optional: a network share to mirror backup snapshots to, so copies
+      # exist somewhere other than this host. Uncomment and set the source,
+      # then set TRACKER_BACKUP_DIR below to /mnt/backup.
+      # - /mnt/nas/launch-tracker-backups:/mnt/backup
+
+    environment:
+      # ── Access ────────────────────────────────────────────────────────
+      # Set these before first run. The application refuses to start without
+      # them rather than serving openly.
+      #
+      # Prefer passing them from the host environment or a secrets manager
+      # rather than writing them here:
+      #     APP_PASSWORD_VIEWER: ${APP_PASSWORD_VIEWER:?set this}
+      APP_PASSWORD_VIEWER: ${APP_PASSWORD_VIEWER:?APP_PASSWORD_VIEWER must be set}
+      APP_PASSWORD_EDITOR: ${APP_PASSWORD_EDITOR:?APP_PASSWORD_EDITOR must be set}
+
+      # ── Backups ───────────────────────────────────────────────────────
+      # 1 = hourly. Recommended: this caps how much work a failure can
+      # destroy at one hour rather than one day.
+      TRACKER_SNAPSHOT_HOURS: "1"
+
+      # Uncomment together with the volume above to mirror snapshots off
+      # this host.
+      # TRACKER_BACKUP_DIR: "/mnt/backup"
+
+      # Retention: recent snapshots, and first-of-month snapshots.
+      TRACKER_KEEP_SNAPSHOTS: "60"
+      TRACKER_KEEP_MONTHLY: "24"
+
+      TZ: "America/Detroit"
+
+    # Modest and sufficient. The application is a single Python process
+    # serving a handful of concurrent users.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+    # Container-level hardening. The application never writes outside
+    # /app/data, so the rest of the filesystem can stay read-only.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/tracker/.streamlit
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  tracker-data:
+    # Named volume. Swap for a bind mount above if the data directory needs
+    # to sit somewhere the existing backup regime already covers.

@@ -20,9 +20,10 @@ import streamlit as st
 import auth
 import gate_schedule as gs
 import launch_model as lm
+import daily_backup
 import store
 import tracker_import
-from config import PROJECT_STATUS_ICON, SIMPLE_LAUNCH_TAG, today
+from config import DUE_SOON_DAYS, PROJECT_STATUS_ICON, SIMPLE_LAUNCH_TAG, today
 from launch_charts import gate_status_bars, gate_timeline, qa_lab_chart
 
 NOW = today()
@@ -151,7 +152,11 @@ st.caption(
 
 open_due = due[due["days_out"].notna() & (due["days_out"] >= 0)]
 k1, k2, k3, k4 = st.columns(4)
-k1.metric(f"Gates due in {horizon_days} days", len(open_due))
+k1.metric(
+    f"Gates due in {DUE_SOON_DAYS} days",
+    int(gates["is_due_soon"].sum()),
+    help="Open gates falling inside the coming fortnight — shown light blue.",
+)
 k2.metric("Gates behind schedule", int(gates["is_behind"].sum()))
 k3.metric("Projects at Red", int((progress["project_status"] == "Red").sum()))
 six_open = gates[
@@ -167,7 +172,8 @@ st.divider()
 st.subheader("Gate timeline")
 st.caption(
     "Each dot is a gate on its due date, numbered by gate. "
-    "Green complete · yellow in progress · red behind. "
+    f"Green complete · **light blue due within {DUE_SOON_DAYS} days** · "
+    "yellow in progress · red behind. "
     f"{SIMPLE_LAUNCH_TAG} rows run 0 → SL → 4 and skip gates 1–3. "
     "The diamond on the dashed tail is the 6 month post-SOP review. "
     "Leading circle is project status."
@@ -185,7 +191,10 @@ left, right = st.columns([3, 2])
 
 with left:
     st.subheader("Gate status")
-    st.caption("One segment per gate, numbered, colored by status.")
+    st.caption(
+        f"One segment per gate, numbered, colored by status. Light blue is "
+        f"due within {DUE_SOON_DAYS} days."
+    )
     st.plotly_chart(gate_status_bars(progress, gates), width="stretch")
 
 with right:
@@ -852,6 +861,114 @@ else:
                     )
                     st.cache_data.clear()
                     st.success("Imported. Reloading.")
+                    st.rerun()
+
+    # -- export and backups ----------------------------------------------
+    with st.expander("Export and backups"):
+        st.markdown("**Export the current data**")
+        st.caption(
+            "The data lives in a SQLite database, which Excel cannot open "
+            "directly. These are the current contents as CSV."
+        )
+        exports = store.export_csv()
+        ec = st.columns(3)
+        for col, (name, payload) in zip(ec, exports.items()):
+            col.download_button(
+                name, payload, file_name=name, mime="text/csv",
+                key=f"dl_{name}", width="stretch",
+            )
+
+        st.divider()
+        st.markdown("**Daily snapshots**")
+
+        snaps = daily_backup.list_snapshots()
+        h = daily_backup.health()
+
+        hc1, hc2, hc3 = st.columns(3)
+        hc1.metric("Backup status", "OK" if h["ok"] else "Attention")
+        hc2.metric(
+            "Newest snapshot",
+            f"{h['age_hours']:.0f} h ago" if h["age_hours"] is not None else "—",
+            help=f"A snapshot is taken every {h.get('interval_hours', 24)} hours.",
+        )
+        hc3.metric("Off-site copy", "yes" if h["offsite"] else "NO")
+
+        for message in h["messages"]:
+            st.warning(message, icon="📦")
+
+        if daily_backup.EXTERNAL_BACKUP_DIR:
+            st.caption(
+                f"Snapshots are mirrored to `{daily_backup.EXTERNAL_BACKUP_DIR}`."
+            )
+
+        if not snaps:
+            st.caption("No snapshots yet.")
+        else:
+            rows = []
+            for snap in snaps[:20]:
+                m = daily_backup.read_manifest(snap)
+                counts = m.get("rows", {})
+                rows.append(
+                    {
+                        "Snapshot": snap.name,
+                        "Taken": m.get("created", "—"),
+                        "Projects": counts.get("projects", "—"),
+                        "Gates": counts.get("gates", "—"),
+                        "Audit": counts.get("audit_log", "—"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        bc1, bc2 = st.columns([1, 2])
+        if bc1.button("Take a snapshot now"):
+            made = daily_backup.run_daily(force=True)
+            st.success(f"Wrote {made.name}." if made else "Nothing to snapshot.")
+            st.rerun()
+
+        if snaps and st.button("Verify all snapshots"):
+            results = [daily_backup.verify(s) for s in snaps]
+            bad = [r for r in results if not r["ok"]]
+            if bad:
+                st.error(f"{len(bad)} of {len(results)} snapshots failed verification.")
+                for r in bad:
+                    st.write(f"**{r['snapshot']}**: " + "; ".join(r["problems"]))
+            else:
+                st.success(f"All {len(results)} snapshots verified — restorable.")
+
+        if snaps:
+            choice = bc2.selectbox(
+                "Restore from snapshot",
+                [s.name for s in snaps],
+                key="restore_pick",
+                help="Replaces everything currently loaded. The current state "
+                     "is snapshotted first, so a restore is itself undoable.",
+            )
+            confirm = st.checkbox(
+                f"I understand this replaces all loaded data with {choice}",
+                key="restore_confirm",
+            )
+            if st.button("Restore", disabled=not confirm, key="restore_go"):
+                try:
+                    result = daily_backup.restore_from_csv(
+                        daily_backup.DAILY_DIR / choice
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Restore failed: {exc}")
+                else:
+                    store.append_audit(
+                        [
+                            {
+                                "timestamp": pd.Timestamp.now().isoformat(
+                                    timespec="seconds"
+                                ),
+                                "role": role, "action": "restore",
+                                "project_id": "*", "field": "snapshot",
+                                "old_value": "", "new_value": choice,
+                            }
+                        ]
+                    )
+                    st.cache_data.clear()
+                    st.success(f"Restored from {choice}: {result}")
                     st.rerun()
 
     # -- audit log ------------------------------------------------------

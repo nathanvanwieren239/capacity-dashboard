@@ -1,4 +1,16 @@
 """
+Backups, plus the atomic-write and locking helpers.
+
+NOTE: since the move to SQLite, `store.py` no longer uses `data_lock()` or
+`atomic_write_csv()` — the database provides transactions, which solve the
+same problems properly. They are kept here because the workbook importer and
+any future file-based work still benefit, and because removing working,
+tested code for tidiness is rarely worth it.
+
+`backup()` is very much still in use, and is now database-aware.
+
+Original notes follow.
+
 Safe file handling for the tracker data: locking, atomic writes, backups.
 
 Three problems this solves, all of which only appear once more than one
@@ -41,8 +53,10 @@ MAX_BACKUPS = 40
 LOCK_TIMEOUT_SECONDS = 15.0
 LOCK_POLL_SECONDS = 0.05
 
-# Files worth snapshotting before a write.
-TRACKED_FILES = ("projects.csv", "gates.csv", "audit_log.csv")
+# Files worth snapshotting before a write. The database is the live store;
+# the CSVs are kept in the list so an older install still gets backed up.
+DB_FILE = "tracker.db"
+TRACKED_FILES = (DB_FILE, "projects.csv", "gates.csv", "audit_log.csv")
 
 
 class LockTimeout(RuntimeError):
@@ -191,7 +205,14 @@ def backup(reason: str = "") -> Path | None:
 
     target.mkdir(parents=True, exist_ok=True)
     for src in sources:
-        shutil.copy2(src, target / src.name)
+        if src.name == DB_FILE:
+            # Copying a live SQLite file can catch it mid-transaction or miss
+            # the write-ahead log. Its own backup API cannot.
+            import db
+
+            db.backup_to(target / src.name)
+        else:
+            shutil.copy2(src, target / src.name)
 
     _prune_backups()
     return target

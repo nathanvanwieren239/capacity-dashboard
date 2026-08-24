@@ -1,40 +1,50 @@
 """
 Read/write store for the launch portfolio, plus an append-only audit log.
 
+Backed by SQLite (`data/tracker.db`). This module is the ONLY thing in the
+application that writes data — the pages, charts and metrics all go through
+it and cannot tell where rows are stored.
+
+--------------------------------------------------------------------------
+WHY SQLITE
+--------------------------------------------------------------------------
+The previous CSV store needed an advisory file lock, atomic temp-file
+writes, and rolling backups to be safe with more than one editor. Those were
+patches around the fact that text files have no notion of a transaction.
+
+Here, each of the mutating functions below runs inside a single BEGIN
+IMMEDIATE transaction. Two editors saving at the same moment serialise
+correctly; a crash mid-write rolls back rather than truncating; and changing
+one date updates one row instead of rewriting the whole dataset.
+
+Backups still exist — a database does not protect you from importing the
+wrong workbook and confirming it — but they now use SQLite's own backup API,
+which is consistent even while the database is in use.
+
 --------------------------------------------------------------------------
 WHERE THIS PERSISTS
 --------------------------------------------------------------------------
-Writes go to CSV files in ./data. Durable on a machine you control - your
-laptop, or an internal server. NOT durable on Streamlit Community Cloud:
-that container is rebuilt on every deploy and `data/*.csv` is gitignored,
-so a fresh container regenerates synthetic data.
-
-All file access lives here. When the source of truth is settled - the Gate
-Zero Summary sheet on SharePoint, or an internal database - this module is
-the only one that changes.
+Durable on a machine you control. NOT durable on Streamlit Community Cloud,
+where the container is rebuilt on every deploy. If containerised for an
+internal server, `data/` must be a mounted volume.
 --------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from functools import wraps
 from pathlib import Path
 
 import pandas as pd
 
+import db
 import gate_schedule as gs
 import launch_model as lm
 import safe_io
 
 DATA_DIR = Path(__file__).parent / "data"
-PROJECTS_CSV = DATA_DIR / "projects.csv"
-GATES_CSV = DATA_DIR / "gates.csv"
-AUDIT_CSV = DATA_DIR / "audit_log.csv"
 
-AUDIT_COLUMNS = [
-    "timestamp", "role", "action", "project_id", "field", "old_value", "new_value",
-]
+AUDIT_COLUMNS = db.AUDIT_COLUMNS
 
 # Fields an editor may change on an existing project. Mirrors the Gate Zero
 # form plus the tracker's own columns.
@@ -44,8 +54,9 @@ EDITABLE_PROJECT_FIELDS = [
     "job_number", "qmsi_number", "qmsi_revision", "opportunity_number",
     "rpn", "peak_annual_sales", "launch_process", "support_required",
     "launch_risk", "qmsi_capex", "cer_amount", "cer_status", "cer_number",
-    "launch_type", "project_status", "prr_count", "prr_amount_first_year",
-    "gate_zero_date", "ppap_target_date", "sop_target_date", "notes",
+    "launch_type", "project_status", "project_phase", "prr_count",
+    "prr_amount_first_year", "gate_zero_date", "ppap_target_date",
+    "sop_target_date", "notes",
 ]
 
 # The three dates that drive every planned gate date.
@@ -67,38 +78,18 @@ class ValidationError(ValueError):
     pass
 
 
-def _guarded(fn):
-    """
-    Serialise a whole read-modify-write.
-
-    The lock must span the read as well as the write. Locking only the write
-    still lets a stale read overwrite a change made in between - which is
-    exactly the lost update this is here to prevent.
-    """
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        with safe_io.data_lock():
-            return fn(*args, **kwargs)
-
-    return wrapper
-
-
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
 def read_audit() -> pd.DataFrame:
-    if not AUDIT_CSV.exists():
-        return pd.DataFrame(columns=AUDIT_COLUMNS)
-    return pd.read_csv(AUDIT_CSV).fillna("")
+    return db.read_audit().fillna("")
 
 
 def append_audit(rows: list[dict]) -> None:
     if not rows:
         return
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows, columns=AUDIT_COLUMNS)
-    safe_io.atomic_append_csv(df, AUDIT_CSV, AUDIT_COLUMNS)
+    with db.transaction() as conn:
+        db.insert_audit(conn, rows)
 
 
 def _fmt(v) -> str:
@@ -129,38 +120,14 @@ def _entry(role: str, action: str, pid: str, field: str, old, new) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Writing
+# Reading inside a transaction
 # ---------------------------------------------------------------------------
-def _iso(v):
-    if v is None or (not isinstance(v, (str, date)) and pd.isna(v)):
-        return None
-    return pd.Timestamp(v).date().isoformat()
+def _projects_in(conn) -> pd.DataFrame:
+    return lm.normalise_projects(db.read_projects(conn))
 
 
-def _write(projects: pd.DataFrame, gates: pd.DataFrame, reason: str = "") -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    p, g = projects.copy(), gates.copy()
-    for col in lm.DATE_COLUMNS_PROJECTS:
-        if col in p.columns:
-            p[col] = p[col].map(_iso)
-    for col in lm.DATE_COLUMNS_GATES:
-        g[col] = g[col].map(_iso)
-    # Snapshot the last known good state, then write so an interruption
-    # cannot leave a half-written file behind.
-    safe_io.backup(reason=reason)
-    safe_io.atomic_write_csv(p, PROJECTS_CSV)
-    safe_io.atomic_write_csv(g, GATES_CSV)
-
-
-def _append(df: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
-    """Append rows after matching dtypes, avoiding pandas' concat warning."""
-    new = pd.DataFrame(rows, columns=df.columns)
-    for col in df.columns:
-        try:
-            new[col] = new[col].astype(df[col].dtype)
-        except (TypeError, ValueError):
-            pass
-    return pd.concat([df, new], ignore_index=True)
+def _gates_in(conn) -> pd.DataFrame:
+    return lm.normalise_gates(db.read_gates(conn))
 
 
 def next_project_id(projects: pd.DataFrame, is_prototype: bool) -> str:
@@ -169,20 +136,18 @@ def next_project_id(projects: pd.DataFrame, is_prototype: bool) -> str:
     return f"{prefix}-{(int(nums.max()) + 7) if len(nums) else 1000}"
 
 
-@_guarded
+# ---------------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------------
 def create_project(*, role: str, fields: dict) -> str:
     """
     Create a project and auto-calculate its whole gate schedule from the
     three Gate Zero dates. Returns the new project_id.
     """
-    projects, gates = lm.load_bundled()
-
     project_type = fields.get("project_type", "Launch")
     launch_type = fields.get("launch_type", "Full")
     if project_type == "Prototype":
         launch_type = "Prototype"
-
-    pid = next_project_id(projects, project_type == "Prototype")
 
     gate_zero = fields.get("gate_zero_date")
     ppap = fields.get("ppap_target_date")
@@ -194,107 +159,126 @@ def create_project(*, role: str, fields: dict) -> str:
     if sop and ppap and sop < ppap:
         raise ValidationError("SOP date cannot be before the PPAP date.")
 
-    new_gates = gs.build_gate_rows(pid, project_type, launch_type, gate_zero, ppap, sop)
+    safe_io.backup(reason="create")
 
-    row = {c: "" for c in projects.columns}
-    row.update(
-        {
-            "project_id": pid,
-            "project_type": project_type,
-            "launch_type": launch_type,
-            "project_status": "Green",
-            "prr_count": 0,
-            "prr_amount_first_year": 0.0,
-            "prr_start_date": None,
-            "prr_end_date": None,
-        }
-    )
-    for key, value in fields.items():
-        if key in projects.columns:
-            row[key] = value
-    if not row.get("project_name"):
-        row["project_name"] = (
-            f"{fields.get('customer_part_number','')} — {fields.get('description','')}"
-        ).strip(" —")
+    with db.transaction() as conn:
+        projects = _projects_in(conn)
+        pid = next_project_id(projects, project_type == "Prototype")
 
-    projects = _append(projects, [row])
-    gates = _append(gates, new_gates)
-    _write(projects, gates, reason="create")
+        row = {c: "" for c in db.PROJECT_COLUMNS}
+        row.update(
+            {
+                "project_id": pid,
+                "project_type": project_type,
+                "launch_type": launch_type,
+                "project_status": "Green",
+                "project_phase": "In-Process",
+                "rpn": 0,
+                "peak_annual_sales": 0.0,
+                "qmsi_capex": 0.0,
+                "cer_amount": 0.0,
+                "prr_count": 0,
+                "prr_amount_first_year": 0.0,
+                "prr_start_date": None,
+                "prr_end_date": None,
+            }
+        )
+        for key, value in fields.items():
+            if key in db.PROJECT_COLUMNS:
+                row[key] = value
+        if not row.get("project_name"):
+            row["project_name"] = (
+                f"{fields.get('customer_part_number','')} — "
+                f"{fields.get('description','')}"
+            ).strip(" —")
 
-    append_audit(
-        [
-            _entry(role, "create", pid, "project_name", "", row["project_name"]),
-            _entry(role, "create", pid, "gate_zero_date", "", gate_zero),
-            _entry(role, "create", pid, "ppap_target_date", "", ppap),
-            _entry(role, "create", pid, "sop_target_date", "", sop),
-        ]
-    )
+        db.insert_project(conn, row)
+        for gate in gs.build_gate_rows(
+            pid, project_type, launch_type, gate_zero, ppap, sop
+        ):
+            db.insert_gate(conn, gate)
+
+        db.insert_audit(
+            conn,
+            [
+                _entry(role, "create", pid, "project_name", "", row["project_name"]),
+                _entry(role, "create", pid, "gate_zero_date", "", gate_zero),
+                _entry(role, "create", pid, "ppap_target_date", "", ppap),
+                _entry(role, "create", pid, "sop_target_date", "", sop),
+            ],
+        )
     return pid
 
 
-@_guarded
 def update_project(role: str, pid: str, changes: dict) -> list[str]:
-    projects, gates = lm.load_bundled()
-    mask = projects["project_id"] == pid
-    if not mask.any():
-        raise KeyError(f"No project {pid}")
-
-    row = projects.loc[mask].iloc[0]
-    audit, summary = [], []
-
-    for field, new in changes.items():
+    """Apply project-level field changes. Returns a list of change summaries."""
+    for field in changes:
         if field not in EDITABLE_PROJECT_FIELDS:
             raise ValidationError(f"{field} is not editable")
-        old = row[field]
-        if _fmt(old) == _fmt(new):
-            continue
-        projects.loc[mask, field] = new
-        action = "seed" if field in SCHEDULE_SEED_FIELDS else "edit"
-        audit.append(_entry(role, action, pid, field, old, new))
-        summary.append(f"{field}: {_fmt(old) or '—'} → {_fmt(new) or '—'}")
 
-    if audit:
-        _write(projects, gates, reason="edit")
-        append_audit(audit)
+    safe_io.backup(reason="edit")
+
+    with db.transaction() as conn:
+        projects = _projects_in(conn)
+        match = projects[projects["project_id"] == pid]
+        if match.empty:
+            raise KeyError(f"No project {pid}")
+        current = match.iloc[0]
+
+        applied, audit, summary = {}, [], []
+        for field, new in changes.items():
+            old = current[field]
+            if _fmt(old) == _fmt(new):
+                continue
+            applied[field] = new
+            action = "seed" if field in SCHEDULE_SEED_FIELDS else "edit"
+            audit.append(_entry(role, action, pid, field, old, new))
+            summary.append(f"{field}: {_fmt(old) or '—'} → {_fmt(new) or '—'}")
+
+        if applied:
+            db.update_project_fields(conn, pid, applied)
+            db.insert_audit(conn, audit)
     return summary
 
 
-@_guarded
 def replan_gates(role: str, pid: str) -> list[str]:
     """
     Recalculate every gate's PLAN date from the project's Gate Zero, PPAP and
-    SOP dates. Adjusted and Actual dates are left untouched - this resets the
+    SOP dates. Adjusted and Actual dates are left untouched — this resets the
     auto-calculated baseline, not the record of what happened.
     """
-    projects, gates = lm.load_bundled()
-    proj = projects[projects["project_id"] == pid]
-    if proj.empty:
-        raise KeyError(f"No project {pid}")
-    p = proj.iloc[0]
+    safe_io.backup(reason="replan")
 
-    if pd.isna(p["gate_zero_date"]):
-        raise ValidationError("This project has no Gate Zero date to plan from.")
+    with db.transaction() as conn:
+        projects = _projects_in(conn)
+        match = projects[projects["project_id"] == pid]
+        if match.empty:
+            raise KeyError(f"No project {pid}")
+        p = match.iloc[0]
 
-    plan = gs.planned_dates(
-        p["project_type"], p["launch_type"],
-        p["gate_zero_date"], p["ppap_target_date"], p["sop_target_date"],
-    )
+        if pd.isna(p["gate_zero_date"]):
+            raise ValidationError("This project has no Gate Zero date to plan from.")
 
-    audit, summary = [], []
-    for idx, g in gates[gates["project_id"] == pid].iterrows():
-        code = g["gate_code"]
-        if code not in plan:
-            continue
-        old, new = g["plan_date"], plan[code]
-        if _fmt(old) == _fmt(new):
-            continue
-        gates.at[idx, "plan_date"] = new
-        audit.append(_entry(role, "replan", pid, f"{code}.plan_date", old, new))
-        summary.append(f"Gate {code} plan: {_fmt(old) or '—'} → {_fmt(new)}")
+        plan = gs.planned_dates(
+            p["project_type"], p["launch_type"],
+            p["gate_zero_date"], p["ppap_target_date"], p["sop_target_date"],
+        )
 
-    if audit:
-        _write(projects, gates, reason="replan")
-        append_audit(audit)
+        gates = _gates_in(conn)
+        audit, summary = [], []
+        for _, g in gates[gates["project_id"] == pid].iterrows():
+            code = g["gate_code"]
+            if code not in plan:
+                continue
+            old, new = g["plan_date"], plan[code]
+            if _fmt(old) == _fmt(new):
+                continue
+            db.update_gate_fields(conn, pid, int(g["gate_no"]), {"plan_date": new})
+            audit.append(_entry(role, "replan", pid, f"{code}.plan_date", old, new))
+            summary.append(f"Gate {code} plan: {_fmt(old) or '—'} → {_fmt(new)}")
+
+        if audit:
+            db.insert_audit(conn, audit)
     return summary
 
 
@@ -340,84 +324,119 @@ def _coerce_gate_frame(pid: str, edited: pd.DataFrame, full: bool) -> pd.DataFra
     return df.sort_values("gate_no", ignore_index=True)
 
 
-@_guarded
 def save_gate_dates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
     """Update Plan / Adjusted / Actual for existing gates. No add or remove."""
-    projects, gates = lm.load_bundled()
     new = _coerce_gate_frame(pid, edited, full=False).set_index("gate_no")
 
-    audit, summary = [], []
-    for idx, g in gates[gates["project_id"] == pid].iterrows():
-        gate_no = int(g["gate_no"])
-        if gate_no not in new.index:
-            continue
-        for field in GATE_DATE_COLUMNS:
-            old, new_val = g[field], new.loc[gate_no, field]
-            if _fmt(old) == _fmt(new_val):
-                continue
-            gates.at[idx, field] = new_val
-            action = "baseline" if field == BASELINE_FIELD else "edit"
-            audit.append(_entry(role, action, pid, f"{g['gate_code']}.{field}", old, new_val))
-            prefix = "⚠ plan " if action == "baseline" else ""
-            summary.append(
-                f"{prefix}Gate {g['gate_code']} {field.replace('_date','')}: "
-                f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
-            )
+    safe_io.backup(reason="gate-dates")
 
-    if audit:
-        _write(projects, gates, reason="gate-dates")
-        append_audit(audit)
+    with db.transaction() as conn:
+        gates = _gates_in(conn)
+        audit, summary = [], []
+
+        for _, g in gates[gates["project_id"] == pid].iterrows():
+            gate_no = int(g["gate_no"])
+            if gate_no not in new.index:
+                continue
+            applied = {}
+            for field in GATE_DATE_COLUMNS:
+                old, new_val = g[field], new.loc[gate_no, field]
+                if _fmt(old) == _fmt(new_val):
+                    continue
+                applied[field] = new_val
+                action = "baseline" if field == BASELINE_FIELD else "edit"
+                audit.append(
+                    _entry(role, action, pid, f"{g['gate_code']}.{field}", old, new_val)
+                )
+                prefix = "⚠ plan " if action == "baseline" else ""
+                summary.append(
+                    f"{prefix}Gate {g['gate_code']} {field.replace('_date','')}: "
+                    f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
+                )
+            if applied:
+                db.update_gate_fields(conn, pid, gate_no, applied)
+
+        if audit:
+            db.insert_audit(conn, audit)
     return summary
 
 
-@_guarded
 def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
     """Advanced: replace the whole gate set, handling adds and removals."""
-    projects, gates = lm.load_bundled()
     new = _coerce_gate_frame(pid, edited, full=True)
 
-    current = gates[gates["project_id"] == pid].set_index("gate_no")
-    incoming = new.set_index("gate_no")
-    audit, summary = [], []
+    safe_io.backup(reason="gate-structure")
 
-    for gate_no in sorted(set(current.index) - set(incoming.index)):
-        code = current.loc[gate_no, "gate_code"]
-        audit.append(_entry(role, "delete", pid, f"gate {code}", code, ""))
-        summary.append(f"Removed gate {code}")
+    with db.transaction() as conn:
+        gates = _gates_in(conn)
+        current = gates[gates["project_id"] == pid].set_index("gate_no")
+        incoming = new.set_index("gate_no")
+        audit, summary = [], []
 
-    for gate_no in sorted(set(incoming.index) - set(current.index)):
-        row = incoming.loc[gate_no]
-        audit.append(
-            _entry(role, "create", pid, f"gate {row['gate_code']}", "", row["plan_date"])
-        )
-        summary.append(f"Added gate {row['gate_code']} on {_fmt(row['plan_date'])}")
+        removed = sorted(set(current.index) - set(incoming.index))
+        for gate_no in removed:
+            code = current.loc[gate_no, "gate_code"]
+            audit.append(_entry(role, "delete", pid, f"gate {code}", code, ""))
+            summary.append(f"Removed gate {code}")
+        db.delete_gates(conn, pid, removed)
 
-    for gate_no in sorted(set(current.index) & set(incoming.index)):
-        old_row, new_row = current.loc[gate_no], incoming.loc[gate_no]
-        for field in GATE_EDIT_COLUMNS:
-            if field == "gate_no":
-                continue
-            old, new_val = old_row[field], new_row[field]
-            if field == "qa_lab_hours":
-                if abs(float(old or 0) - float(new_val or 0)) < 0.05:
-                    continue
-            elif _fmt(old) == _fmt(new_val):
-                continue
-            action = "baseline" if field == BASELINE_FIELD else "edit"
+        for gate_no in sorted(set(incoming.index) - set(current.index)):
+            row = incoming.loc[gate_no]
+            payload = {c: row.get(c) for c in db.GATE_COLUMNS if c in row}
+            payload.update({"project_id": pid, "gate_no": int(gate_no)})
+            payload.setdefault("status_override", "")
+            db.insert_gate(conn, payload)
             audit.append(
-                _entry(role, action, pid, f"{old_row['gate_code']}.{field}", old, new_val)
+                _entry(role, "create", pid, f"gate {row['gate_code']}", "",
+                       row["plan_date"])
             )
             summary.append(
-                f"Gate {old_row['gate_code']} {field.replace('_', ' ')}: "
-                f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
+                f"Added gate {row['gate_code']} on {_fmt(row['plan_date'])}"
             )
 
-    if audit:
-        others = gates[gates["project_id"] != pid]
-        gates = pd.concat(
-            [others, new.reindex(columns=others.columns)], ignore_index=True
-        )
-        gates["gate_no"] = gates["gate_no"].astype(int)
-        _write(projects, gates, reason="gate-structure")
-        append_audit(audit)
+        for gate_no in sorted(set(current.index) & set(incoming.index)):
+            old_row, new_row = current.loc[gate_no], incoming.loc[gate_no]
+            applied = {}
+            for field in GATE_EDIT_COLUMNS:
+                if field == "gate_no":
+                    continue
+                old, new_val = old_row[field], new_row[field]
+                if field == "qa_lab_hours":
+                    if abs(float(old or 0) - float(new_val or 0)) < 0.05:
+                        continue
+                elif _fmt(old) == _fmt(new_val):
+                    continue
+                applied[field] = new_val
+                action = "baseline" if field == BASELINE_FIELD else "edit"
+                audit.append(
+                    _entry(role, action, pid, f"{old_row['gate_code']}.{field}",
+                           old, new_val)
+                )
+                summary.append(
+                    f"Gate {old_row['gate_code']} {field.replace('_', ' ')}: "
+                    f"{_fmt(old) or '—'} → {_fmt(new_val) or '—'}"
+                )
+            if applied:
+                db.update_gate_fields(conn, pid, int(gate_no), applied)
+
+        if audit:
+            db.insert_audit(conn, audit)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Export - the data stays reachable in Excel
+# ---------------------------------------------------------------------------
+def export_csv() -> dict[str, bytes]:
+    """
+    Current contents as CSV bytes, for download.
+
+    A database is not openable in Excel, which was the one real cost of
+    moving off files. This gives the data back without giving up transactions.
+    """
+    projects, gates = lm.load_bundled()
+    return {
+        "projects.csv": projects.to_csv(index=False).encode(),
+        "gates.csv": gates.to_csv(index=False).encode(),
+        "audit_log.csv": read_audit().to_csv(index=False).encode(),
+    }

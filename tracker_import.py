@@ -355,15 +355,18 @@ def write(projects: pd.DataFrame, gates: pd.DataFrame) -> None:
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     p, g = projects.copy(), gates.copy()
-    for col in ("gate_zero_date", "ppap_target_date", "sop_target_date",
-                "prr_start_date", "prr_end_date"):
-        p[col] = p[col].map(_iso)
-    for col in ("plan_date", "adjusted_date", "actual_date"):
-        g[col] = g[col].map(_iso)
-    with safe_io.data_lock():
-        safe_io.backup(reason="pre-import")
-        safe_io.atomic_write_csv(p, DATA_DIR / "projects.csv")
-        safe_io.atomic_write_csv(g, DATA_DIR / "gates.csv")
+    import db
+    import launch_model as lm
+
+    safe_io.backup(reason="pre-import")
+
+    # Drop gates whose project is missing - the foreign key would reject them
+    # and take the whole import down with it.
+    known = set(p["project_id"])
+    g = g[g["project_id"].isin(known)]
+
+    # One transaction: either the whole new dataset lands or none of it.
+    db.replace_all(lm.normalise_projects(p), lm.normalise_gates(g))
 
 
 def main() -> None:

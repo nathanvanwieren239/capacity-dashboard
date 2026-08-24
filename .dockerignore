@@ -1,0 +1,34 @@
+# Data never goes into the image. It belongs on a mounted volume — baking it
+# in would ship synthetic records to production and hide the volume mistake
+# the whole deployment is trying to avoid.
+data/
+
+# Credentials never go into the image. Passwords are passed as environment
+# variables at run time. See DEPLOY.md.
+.streamlit/secrets.toml
+
+# Local development
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.devcontainer/
+
+# Generated output
+preview/
+*.xlsx
+*.xlsm
+*.xlsb
+
+# Documentation is useful in the repo, not in the runtime image
+docs/
+*.md
+!README.md
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

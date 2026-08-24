@@ -117,6 +117,11 @@ SLIP_WINDOW_DAYS = 45  # a gate older than this would have been escalated
 # Indices into STANDALONE that are running late, so the demo shows red.
 SLIPPING_STANDALONE = {1, 4, 6}
 
+# Projects whose next open gate is pulled into the coming fortnight, so the
+# "due soon" state is actually visible in the demo rather than depending on
+# where the generated dates happen to fall.
+DUE_SOON_PROJECTS = 5
+
 
 def _iso(d) -> str | None:
     return None if d is None or pd.isna(d) else pd.Timestamp(d).date().isoformat()
@@ -284,9 +289,45 @@ def build() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     proj_df = pd.DataFrame(projects)
     gate_df = pd.DataFrame(gates)
+
+    _seed_due_soon(gate_df, proj_df, rng, now)
+
     for col in ("plan_date", "adjusted_date", "actual_date"):
         gate_df[col] = gate_df[col].map(_iso)
     return proj_df, gate_df
+
+
+def _seed_due_soon(gates: pd.DataFrame, projects: pd.DataFrame, rng, now) -> None:
+    """
+    Pull the next open gate of a few live projects into the coming fortnight.
+
+    Without this, whether the "due soon" colour appears at all depends on
+    where the generated dates happen to land, which makes the demo
+    inconsistent from one regeneration to the next.
+    """
+    candidates = [
+        pid for pid in projects["project_id"]
+        if not str(pid).startswith("P-")
+    ]
+
+    picked = 0
+    for pid in candidates:
+        if picked >= DUE_SOON_PROJECTS:
+            break
+        rows = gates[(gates["project_id"] == pid) & gates["actual_date"].isna()]
+        rows = rows[rows["plan_date"].notna()]
+        if rows.empty:
+            continue
+        # Only move gates that are currently in the future - never drag a
+        # late gate forwards and quietly hide a slip.
+        future = rows[rows["plan_date"] > now]
+        if future.empty:
+            continue
+        idx = future.sort_values("gate_no").index[0]
+        offset = int(rng.integers(3, 14))
+        gates.at[idx, "plan_date"] = now + timedelta(days=offset)
+        gates.at[idx, "adjusted_date"] = None
+        picked += 1
 
 
 def main() -> None:

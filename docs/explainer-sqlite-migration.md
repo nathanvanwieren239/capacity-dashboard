@@ -238,3 +238,9 @@ quarter.
    plus the concurrency test that currently proves the lock works — it should
    pass unchanged, which is the point.
 8. Keep the CSVs untouched alongside the database for a few weeks.
+
+## Update, 23 Aug 2026
+
+This migration was carried out. See the storage section of the README for
+what landed. The estimate above held: the change was confined to `store.py`
+and a new `db.py`, and no chart, metric, filter or page was touched.

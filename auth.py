@@ -22,6 +22,7 @@ carries live data.
 from __future__ import annotations
 
 import hmac
+import os
 
 import streamlit as st
 
@@ -38,11 +39,24 @@ _SECRET_FOR_ROLE = {
 
 
 def _secret(name: str) -> str | None:
+    """
+    Read a password from Streamlit secrets, falling back to the environment.
+
+    The environment fallback exists for container deployment: passing
+    `-e APP_PASSWORD_EDITOR=...` is far simpler than mounting a secrets file
+    into an image, and it keeps credentials out of the filesystem entirely.
+    Secrets file wins when both are present, so local development is
+    unaffected.
+    """
     try:
         value = st.secrets[name]
+        if value:
+            return str(value)
     except Exception:
-        return None
-    return str(value) if value else None
+        pass
+
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 def _configured() -> dict[str, str]:

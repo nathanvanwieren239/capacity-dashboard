@@ -73,9 +73,20 @@ measured against that. The scorecard also shows on-time **against the
 original plan** — the gap between the two is how much of the on-time record
 depends on dates that were moved.
 
-Gate status is derived, never stored: green complete, yellow in progress,
-red behind. Project status (R/Y/G) is assessed separately by the PM and shows
-as the leading circle on each row.
+Gate status is derived, never stored — four states in precedence order:
+
+| State | Colour | Meaning |
+|---|---|---|
+| Complete | green | an actual date is recorded |
+| Behind | red | open, and the due date has passed |
+| Due soon | light blue | open, due within `DUE_SOON_DAYS` (default 14) |
+| In progress | yellow | open, due further out |
+
+Behind wins over due soon, so a gate that is already late stays red rather
+than being softened to blue. `DUE_SOON_DAYS` lives in `config.py`.
+
+Project status (R/Y/G) is assessed separately by the PM and shows as the
+leading circle on each row.
 
 ## Editing data — and where it saves
 
@@ -116,21 +127,91 @@ timestamp, role, field, old and new value. Actions are tagged: `baseline` for
 a hand-edited plan date, `replan` for an auto-recalculation, `seed` for a
 change to the Gate Zero / PPAP / SOP dates.
 
-### Write safety
+### Storage
 
-Every save goes through `safe_io.py`:
+Data lives in **SQLite** — one file, `data/tracker.db`. No server, nothing
+for IT to install; SQLite ships with Python.
 
-- **An exclusive lock** spans the whole read-modify-write, so two editors
-  saving at once queue instead of silently overwriting each other.
-- **Atomic writes** — a temp file is written, flushed, then renamed over the
-  target. An interruption leaves the old file intact, never a fragment.
-- **A timestamped snapshot** of all three data files before every write, in
-  `data/backups/`, keeping the most recent 40. `safe_io.restore(path)` puts
-  one back.
+Every mutating function in `store.py` runs inside a `BEGIN IMMEDIATE`
+transaction:
 
-Verified with 20 concurrent writers: all 20 changes landed, the audit chain
-was intact end to end, and a deliberately interrupted write left the target
-file untouched.
+- **Concurrent editors serialise.** Two people saving at once queue rather
+  than one silently overwriting the other.
+- **A crash rolls back.** There is no half-written state to recover from.
+- **Targeted writes.** Changing one date updates one row instead of
+  rewriting the whole dataset.
+- **Foreign keys.** A gate cannot reference a project that does not exist,
+  and deleting a project removes its gates.
+
+Verified with 20 concurrent writers: all 20 changes landed and the audit
+chain was intact end to end — each write's old value matching the previous
+write's new value.
+
+#### Backups
+
+Two layers:
+
+**Per-write snapshots** — `safe_io.backup()` snapshots before every write into
+`data/backups/`, keeping the most recent 40, using SQLite's own backup API so
+the copy is consistent even mid-transaction.
+
+**Daily snapshots** — `daily_backup.py` writes a dated folder to
+`data/backups/daily/` holding both `tracker.db` (exact restore) and CSVs of
+every table (readable by anything, forever), plus a `manifest.json` of row
+counts. Runs automatically on first use each day; also a CLI for a scheduler.
+
+```bash
+python daily_backup.py                 # today's snapshot, if not already taken
+python daily_backup.py --list          # what exists
+python daily_backup.py --restore data/backups/daily/2026-08-23
+```
+
+Configuration (environment variables):
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TRACKER_SNAPSHOT_HOURS` | `24` | Set to `1` for hourly. Recommended once this is the system of record |
+| `TRACKER_BACKUP_DIR` | unset | Network path to mirror every snapshot to |
+| `TRACKER_KEEP_SNAPSHOTS` | `60` | Recent snapshots retained |
+| `TRACKER_KEEP_MONTHLY` | `24` | First-of-month snapshots retained |
+
+Every snapshot records a SQLite `integrity_check` result in its manifest.
+`--verify` walks all snapshots and confirms the CSVs parse, row counts match
+the manifest, and the database copy is sound. Tested by deliberately
+corrupting a backup and by deleting rows from a CSV — both caught.
+
+```bash
+python daily_backup.py --verify   # are the backups actually restorable?
+python daily_backup.py --health   # is the arrangement working at all?
+```
+
+Backup health is surfaced in the app (editor → Export and backups): snapshot
+age, verification result, and whether an off-machine copy exists. A silently
+failing backup becomes a visible one.
+
+Restore is available in the app (editor → Export and backups) and has been
+**verified end to end**: the database and all working files were deleted, then
+rebuilt from a snapshot's CSVs alone — projects, gates, every date and the
+full audit history came back identical.
+
+> ⚠️ Snapshots live beside the database. That covers a bad edit or import; it
+> does **not** cover losing the machine. Set `TRACKER_BACKUP_DIR` to a network
+> path and every snapshot is mirrored there, or get `data/` into the company's
+> existing backup regime.
+
+The data is not openable in Excel any more, so the editor view has an
+**Export to CSV** expander that downloads projects, gates and the audit log.
+
+#### Migrating from the old CSV store
+
+```bash
+python migrate_to_sqlite.py            # convert data/*.csv into data/tracker.db
+python migrate_to_sqlite.py --verify   # confirm the database matches the CSVs
+```
+
+Verifies row counts and a checksum of the key fields before declaring
+success, and leaves the CSVs untouched. A fresh install needs none of this —
+the app builds the database on first run.
 
 ⚠️ **Persistence caveat.** Writes are durable on a machine you control — your
 laptop or an internal server. They are **not** durable on Streamlit Community
@@ -158,8 +239,12 @@ one module changes and nothing else has to.
 | `launch_model.py` | Launch/gate math — Streamlit-free, testable |
 | `launch_charts.py` | Plotly figures, renderable outside Streamlit |
 | `launch_data.py` | Synthetic portfolio data + the column contract |
-| `store.py` | The only module that writes. Swap to change source of truth |
-| `safe_io.py` | Locking, atomic writes, rolling backups |
+| `store.py` | The only module that writes. Same signatures regardless of backend |
+| `db.py` | SQLite connections, transactions, row-level writes |
+| `schema.sql` | Three tables, foreign keys, indexes |
+| `migrate_to_sqlite.py` | One-time CSV → database conversion, with verification |
+| `safe_io.py` | Per-write backups. Its lock and atomic-write helpers are now unused by `store` |
+| `daily_backup.py` | Daily dated snapshots in both formats, retention, and restore |
 | `tracker_import.py` | Reads the real Gate Zero / Project Launch Tracker workbook |
 | `preview.py` | Renders the launch charts to `preview/` as static HTML |
 | `capacity_model.py`, `synthetic_data.py` | The future-state capacity page |

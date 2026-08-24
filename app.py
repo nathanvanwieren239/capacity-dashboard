@@ -29,6 +29,27 @@ st.set_page_config(
 # Nothing below this line renders until a valid password is accepted.
 auth.require_password()
 
+
+# Take the day's backup on first use. A no-op once today's exists, so the
+# cost is one filesystem check per session. Deliberately never fatal: a
+# backup problem should be visible, not something that stops people working.
+@st.cache_resource
+def _daily_backup_once():
+    try:
+        import daily_backup
+
+        made = daily_backup.run_daily()
+        return {"ok": True, "snapshot": str(made) if made else None}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+_BACKUP_STATUS = _daily_backup_once()
+if not _BACKUP_STATUS["ok"]:
+    st.sidebar.warning(
+        f"Daily backup did not run: {_BACKUP_STATUS['error']}", icon="⚠️"
+    )
+
 # --- branding, shown on every page ----------------------------------------
 LOGO_WIDTH_PX = 190  # tune to taste; sidebar is ~300 px wide
 

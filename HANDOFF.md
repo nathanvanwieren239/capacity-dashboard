@@ -36,6 +36,8 @@ customer names are committed to the repo.
 
 Working and verified:
 
+- **SQLite storage** with real transactions, foreign keys and backups
+
 - Real-date gate model matching the tracker sheet
 - Auto-calculated plan dates (verified to reproduce the sheet exactly)
 - Gate timeline, gate status bars, scorecard, coming-due list, project detail
@@ -104,6 +106,10 @@ launch_model.py         all launch/gate math, Streamlit-free
 launch_charts.py        Plotly figures, renderable headlessly
 launch_data.py          synthetic data generator + column contract
 store.py                the ONLY module that writes data
+db.py                   SQLite connections and transactions
+schema.sql              table definitions
+migrate_to_sqlite.py    one-time CSV -> database conversion
+safe_io.py              backups (its lock/atomic helpers are now unused)
 tracker_import.py       reads the real Excel workbook
 
 capacity_model.py       future-state capacity page
@@ -113,8 +119,10 @@ preview.py              renders charts to static HTML without Streamlit
 
 Two rules worth preserving:
 
-1. **`store.py` is the only writer.** When the source of truth moves to
-   SharePoint or a database, that one module changes and nothing else does.
+1. **`store.py` is the only writer.** This was proven out by the move from
+   CSV files to SQLite: `store.py` and `db.py` changed, and not one chart,
+   metric, filter or page did. If the source of truth ever moves to
+   SharePoint, the same holds.
 2. **The model and chart layers never import Streamlit.** That's what makes
    them testable and what lets `preview.py` render charts headlessly.
 

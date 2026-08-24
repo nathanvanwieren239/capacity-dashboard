@@ -24,10 +24,18 @@ DIVISIONS = ["MS", "PS"]
 BRAND_BLUE = "#416AB9"
 BRAND_LIGHT = "#35B0F1"
 
-# Gate status colors: complete green, in progress yellow, behind red.
+# How far ahead a gate counts as "coming up" rather than simply open.
+DUE_SOON_DAYS = 14
+
+# Gate status colours.
+#   complete    -> green
+#   behind      -> red
+#   due soon    -> light blue, the NN secondary brand colour
+#   in progress -> yellow
 GATE_COLORS = {
     "Complete": "#2CA02C",
     "In progress": "#E8A33D",
+    "Due soon": "#35B0F1",
     "Behind": "#D62728",
 }
 
