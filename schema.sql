@@ -78,3 +78,22 @@ CREATE INDEX IF NOT EXISTS idx_gates_project ON gates(project_id);
 CREATE INDEX IF NOT EXISTS idx_gates_code    ON gates(gate_code);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id);
 CREATE INDEX IF NOT EXISTS idx_audit_time    ON audit_log(timestamp);
+
+-- Add this to schema.sql, alongside the existing projects/gates/audit_log
+-- tables. db.init() runs the whole file via executescript() on every start,
+-- and every CREATE TABLE below already uses IF NOT EXISTS, so this is safe
+-- to add without a separate migration step — it just appears the next time
+-- the app starts against this database.
+ 
+CREATE TABLE IF NOT EXISTS users (
+    username        TEXT PRIMARY KEY,
+    password_hash   TEXT NOT NULL,
+    role            TEXT NOT NULL CHECK (role IN ('viewer', 'editor')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    active          INTEGER NOT NULL DEFAULT 1
+);
+ 
+-- 'active' lets an account be disabled (role change, someone leaves) without
+-- deleting the row, so old audit log entries still resolve to a real name
+-- rather than a dangling reference.
+ 
