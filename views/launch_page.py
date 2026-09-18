@@ -671,6 +671,7 @@ else:
                     except Exception as exc:
                         st.error(f"Couldn't delete: {exc}")
                     else:
+                        st.cache_data.clear()
                         st.success(f"Deleted {removed_name} ({pick}).")
                         st.rerun()
     # -- add gate zero --------------------------------------------------
