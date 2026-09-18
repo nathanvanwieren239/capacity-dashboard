@@ -423,7 +423,40 @@ def replace_gates(role: str, pid: str, edited: pd.DataFrame) -> list[str]:
             db.insert_audit(conn, audit)
     return summary
 
-
+# Add this function to store.py, after replace_gates() and before the
+# "Export" section header (around line 425). It follows the same shape as
+# every other mutation here: validate, backup, single transaction, audit
+# log, return something the UI can show.
+ 
+def delete_project(role: str, pid: str) -> str:
+    """
+    Permanently remove a project and all of its gates.
+ 
+    There is no undo inside the app — recovery means restoring from a
+    snapshot (see safe_io / the backup system), same as any other mistaken
+    edit. That's a deliberate choice: a "soft delete" flag would need every
+    read path (charts, metrics, exports) to remember to filter it out, and
+    forgetting even one place would silently resurrect deleted projects in
+    a report. A hard delete plus a reliable backup is a smaller surface to
+    get right than a soft-delete flag threaded through the whole app.
+ 
+    Returns the project name that was removed, so the caller can show a
+    confirmation message.
+    """
+    safe_io.backup(reason="delete-project")
+ 
+    with db.transaction() as conn:
+        projects = _projects_in(conn)
+        match = projects[projects["project_id"] == pid]
+        if match.empty:
+            raise KeyError(f"No project {pid}")
+        name = match.iloc[0]["project_name"]
+ 
+        db.delete_project(conn, pid)
+        db.insert_audit(conn, [_entry(role, "delete", pid, "project", name, "")])
+ 
+    return name
+ 
 # ---------------------------------------------------------------------------
 # Export - the data stays reachable in Excel
 # ---------------------------------------------------------------------------
