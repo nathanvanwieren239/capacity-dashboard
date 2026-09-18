@@ -273,6 +273,16 @@ def delete_gates(conn, project_id: str, gate_nos: list[int] | None = None) -> No
         [project_id, *[int(n) for n in gate_nos]],
     )
 
+# Add this function to db.py, right after delete_gates() (around line 274).
+# It's the raw-SQL layer store.delete_project() calls into — same split of
+# responsibility as every other mutation in this file: db.py touches SQL,
+# store.py handles validation, backups, and the audit log.
+ 
+def delete_project(conn, project_id: str) -> None:
+    """Remove a project and all of its gates. No undo — the caller is
+    responsible for taking a backup first (store.delete_project does)."""
+    conn.execute("DELETE FROM gates WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM projects WHERE project_id = ?", (project_id,))
 
 def insert_audit(conn, rows: list[dict]) -> None:
     if not rows:
