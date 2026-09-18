@@ -1021,34 +1021,13 @@ else:
 with st.expander("What this reflects, and what it still needs"):
     st.markdown(
         """
-**From the 19 Aug review**
-
-- Real dates throughout. Manufacturing weeks are gone.
-- Gate 3 is PPAP and Gate 4 is SOP, matching the tracker.
-- Simple launches run **0 → SL → 4**, no gates 1–3.
-- Gate 1 and Gate 2 plan dates are calculated at one third and two thirds of
-  the days between kickoff and PPAP, with manual override and a recalculate
-  button.
-- Plan / Adjusted / Actual on every gate. On-time uses Adjusted where present,
-  otherwise Plan.
-- 6 month post-SOP review as a diamond on a dashed tail.
-- Launch type `n/a` is now `Prototype`, and the launch type filter disables
-  itself when launches are not selected — that was the filter bug.
-- QMSI revision captured. Gate Zero form fields carried through: div, sales
-  person, customer part number, description, opportunity #, RPN, CapEx and
-  CER, peak annual sales, launch process, support required, launch risk.
-- PRRs within 12 months of SOP as a headline metric.
-- Plants are Kentwood, Marshall, Wellington and North Attleboro.
-- QA lab view hidden behind a sidebar toggle.
-
 **Still open**
 
-- The prototype gate route is invented — 0, S, R. It needs a real one.
-- The PRR metric is a count. Review suggested a rate or percentage; the
-  denominator has not been decided.
-- QA lab hours per gate are guesses.
-- Pulling Gate Zero rows straight from the form, and PRR counts from Galaxy,
-  are both still manual.
-- All data here is synthetic.
+Priority Updates as of September 18
+- SSO needed to replace current password management by Nathan Van Wieren.
+
+Future State Updates
+- Metrology Lab is using synthetic data
+- Capacity is marked for future deployment
 """
     )
