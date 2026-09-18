@@ -352,7 +352,7 @@ if not auth.is_editor():
         "Edit access is intended for Ryan, Lothian and possibly Craig."
     )
 else:
-    role = auth.current_role()
+    role = auth.current_username()
     st.caption(
         "Changes are written to the tracker files and appear immediately. "
         "Every change is recorded in the audit log below."
@@ -651,7 +651,28 @@ else:
                         st.rerun()
                     else:
                         st.info("No structural changes to save.")
-
+        st.markdown("---")
+        with st.expander("⚠️ Delete this project"):
+            st.warning(
+                f"This permanently removes **{rec['project_name']}** (`{pick}`) "
+                "and all of its gates. There is no undo inside the app — "
+                "recovery means restoring from a backup snapshot."
+            )
+            confirm_text = st.text_input(
+                f"Type the project ID (`{pick}`) to confirm",
+                key=f"delete_confirm_{pick}",
+            )
+            if st.button("Delete project", key=f"delete_button_{pick}", type="primary"):
+                if confirm_text.strip() != pick:
+                    st.error("Project ID didn't match — nothing was deleted.")
+                else:
+                    try:
+                        removed_name = store.delete_project(role, pick)
+                    except Exception as exc:
+                        st.error(f"Couldn't delete: {exc}")
+                    else:
+                        st.success(f"Deleted {removed_name} ({pick}).")
+                        st.rerun()
     # -- add gate zero --------------------------------------------------
     with tab_gate0:
         st.caption(
