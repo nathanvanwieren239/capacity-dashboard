@@ -9,6 +9,7 @@ services:
   launch-tracker:
     build: .
     image: launch-tracker:latest
+    pull_policy: build
     container_name: launch-tracker
     restart: unless-stopped
 
